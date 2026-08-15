@@ -95,6 +95,12 @@ Monitors onchain identity, endpoint health, task state, payment reconciliation, 
 - Added a separate Onchain explorer with live search, protocol and x402-claim filters, source score/rank/feedback observations, and BscScan links.
 - Kept BSC Mainnet identity discovery separate from BSC Testnet payment execution to avoid implying production settlement readiness.
 - Removed untrusted remote image loading; deterministic local initials prevent mixed-content, localhost, and blocked-origin failures.
+- Extended the same source-preserving sync to BSC Testnet and added network switching in the Onchain explorer.
+- Added separate private raw storage and public typed projections for 8004scan feedback history on both BSC networks.
+- Replaced text initials with deterministic local identicon artwork across marketplace cards, comparisons, detail views, and both Onchain networks.
+- Restored original 8004scan agent icons through a backend-only HTTPS proxy with DNS/private-IP SSRF checks, MIME/size limits, MongoDB caching, and identicon fallback.
+- Validated the icon proxy, source/fallback rendering, cache behavior, network isolation, and SSRF defenses with a total backend regression count of 47 passing tests.
+- Made Binance Wallet connector lazy: it initializes only when the extension is present, preventing background websocket errors for other visitors.
 
 ## Current integration status
 

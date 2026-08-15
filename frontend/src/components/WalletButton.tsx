@@ -11,6 +11,8 @@ export const WalletButton = () => {
   const { disconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
   const short = address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "Connect wallet";
+  const hasBinanceConnector = connectors.some(connector => connector.name.toLowerCase().includes("binance"));
+  const binanceWalletUrl = process.env.REACT_APP_BINANCE_WALLET_URL;
 
   if (address) return (
     <DropdownMenu>
@@ -29,6 +31,7 @@ export const WalletButton = () => {
         {connectors.map((connector, index) => (
           <DropdownMenuItem data-testid={`wallet-option-${index}`} key={`${connector.uid}-${index}`} onClick={() => connect({ connector }, { onError: (e) => toast.error(e.message) })}>{connector.name}</DropdownMenuItem>
         ))}
+        {!hasBinanceConnector && binanceWalletUrl && <DropdownMenuItem data-testid="wallet-option-binance-install" onClick={() => window.open(binanceWalletUrl, "_blank", "noopener,noreferrer")}>Binance Wallet · Install extension</DropdownMenuItem>}
       </DropdownMenuContent>
     </DropdownMenu>
   );

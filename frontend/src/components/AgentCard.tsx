@@ -3,11 +3,12 @@ import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { Agent } from "@/types";
+import { AgentAvatar } from "@/components/AgentAvatar";
 
 export const AgentCard = ({ agent, selected, toggleCompare }: { agent: Agent; selected: boolean; toggleCompare: (id: string) => void }) => (
   <article className="agent-card" data-testid={`agent-card-${agent.id}`}>
     <div className="agent-card-top">
-      <div className={`agent-avatar tone-${agent.identity.agent_id % 5}`} data-testid={`agent-avatar-${agent.id}`}>{agent.name.split(" ").map(x => x[0]).join("")}</div>
+      <AgentAvatar name={`${agent.name}-${agent.id}`} testId={`agent-avatar-${agent.id}`} />
       <div className="agent-card-heading"><div className="agent-name-line"><h3 data-testid={`agent-name-${agent.id}`}>{agent.name}</h3>{agent.identity.metadata_verified && <ShieldCheck size={15} aria-label="Metadata verified" />}</div><p data-testid={`agent-category-${agent.id}`}>{agent.category}</p></div>
       <Badge data-testid={`agent-status-${agent.id}`} className={agent.status === "active" ? "status-live" : "status-offline"}>{agent.status === "active" ? "Live" : "Offline"}</Badge>
     </div>

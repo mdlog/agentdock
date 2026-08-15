@@ -14,7 +14,7 @@ from pymongo import MongoClient
 if "/app/backend" not in sys.path:
     sys.path.append("/app/backend")
 
-from scan8004 import Scan8004Error, Scan8004Client, sync_bsc_mainnet
+from scan8004 import Scan8004Error, Scan8004Client, sync_bsc_mainnet, sync_feedbacks
 
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL")
@@ -223,6 +223,7 @@ class _FakeCollection:
 class _FakeDb:
     def __init__(self):
         self.scan_agents = _FakeCollection(docs=[{"chain_id": 56, "token_id": 1}, {"chain_id": 56, "token_id": 2}])
+        self.scan_feedbacks = _FakeCollection(docs=[{"chain_id": 56, "feedback_id": "f1"}, {"chain_id": 56, "feedback_id": "f2"}])
         self.sync_runs = _FakeCollection()
 
 
@@ -240,6 +241,25 @@ async def test_provider_failure_keeps_last_known_good_data(monkeypatch):
 
     assert result["status"] == "degraded"
     assert result["source"] == "8004scan"
+    assert result["chain_id"] == 56
+    assert result["is_testnet"] is False
+    assert before == after
+
+
+@pytest.mark.anyio
+async def test_feedback_provider_failure_keeps_last_known_good_data(monkeypatch):
+    async def _raise_feedback_failure(_self, chain_id, is_testnet, page=1, limit=100):
+        raise Scan8004Error("forced feedback provider outage")
+
+    monkeypatch.setattr(Scan8004Client, "list_feedbacks", _raise_feedback_failure)
+
+    fake_db = _FakeDb()
+    before = list(fake_db.scan_feedbacks.docs)
+    result = await sync_feedbacks(fake_db, 56, False)
+    after = list(fake_db.scan_feedbacks.docs)
+
+    assert result["status"] == "degraded"
+    assert result["source"] == "8004scan_feedbacks"
     assert result["chain_id"] == 56
     assert result["is_testnet"] is False
     assert before == after

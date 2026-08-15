@@ -115,10 +115,12 @@ class ScanAgent(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
     chain_id: int
+    is_testnet: bool = False
     token_id: int
     name: str
     description: str
     image_url: str | None = None
+    has_source_icon: bool = False
     owner_address: str | None = None
     contract_address: str | None = None
     supported_protocols: list[str] = Field(default_factory=list)
@@ -142,3 +144,22 @@ class ScanAgentList(BaseModel):
     source: str = "8004scan"
     chain_id: int = 56
     is_testnet: bool = False
+
+
+class ScanFeedback(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    chain_id: int
+    is_testnet: bool
+    feedback_id: str
+    agent_id: str | int | None = None
+    score: float | None = None
+    comment: str | None = None
+    transaction_hash: str | None = None
+    block_number: int | None = None
+    user_address: str | None = None
+    endpoint: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    is_revoked: bool
+    submitted_at: str | None = None
+    synced_at: str
+    source: str

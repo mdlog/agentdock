@@ -4,14 +4,15 @@ import re
 import uuid
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
-from models import Agent, AgentList, AuditEvent, CompareRequest, FeedbackRequest, IntegrationReadiness, QuoteRequest, ScanAgent, ScanAgentList, TaskCreate, TaskDetail, TaskRecord
+from models import Agent, AgentList, AuditEvent, CompareRequest, FeedbackRequest, IntegrationReadiness, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
-from scan8004 import sync_bsc_mainnet
+from scan8004 import sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
+from icon_proxy import get_agent_icon
 
 
 load_dotenv()
@@ -40,9 +41,15 @@ async def startup() -> None:
     await db.scan_agents.create_index([("chain_id", 1), ("token_id", 1)], unique=True)
     await db.scan_agents.create_index([("name", "text"), ("description", "text")])
     await db.sync_runs.create_index([("source", 1), ("chain_id", 1)], unique=True)
+    await db.scan_feedbacks.create_index([("chain_id", 1), ("feedback_id", 1)], unique=True)
+    await db.scan_feedbacks.create_index([("chain_id", 1), ("agent_id", 1), ("submitted_at", -1)])
+    await db.scan_agent_icons.create_index([("chain_id", 1), ("token_id", 1)], unique=True)
     if await db.agents.count_documents({}) == 0:
         await db.agents.insert_many(seed_agents())
     app.state.scan_sync_task = __import__("asyncio").create_task(sync_bsc_mainnet(db))
+    app.state.scan_testnet_task = __import__("asyncio").create_task(sync_bsc_testnet(db))
+    app.state.scan_mainnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 56, False))
+    app.state.scan_testnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 97, True))
 
 
 @api.get("/", tags=["system"])
@@ -74,20 +81,29 @@ async def readiness():
 
 
 @api.get("/integrations/8004scan/status", tags=["system"])
-async def scan_status():
-    status = await db.sync_runs.find_one({"source": "8004scan", "chain_id": 56}, {"_id": 0})
-    return status or {"status": "never_run", "source": "8004scan", "chain_id": 56, "is_testnet": False}
+async def scan_status(network: str = "mainnet"):
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id = 97 if network == "testnet" else 56
+    status = await db.sync_runs.find_one({"source": "8004scan", "chain_id": chain_id}, {"_id": 0})
+    feedback_count = await db.scan_feedbacks.count_documents({"chain_id": chain_id})
+    result = status or {"status": "never_run", "source": "8004scan", "chain_id": chain_id, "is_testnet": network == "testnet"}
+    return {**result, "feedback_sample": feedback_count}
 
 
 @api.get("/onchain/agents", response_model=ScanAgentList, tags=["agents"])
 async def list_onchain_agents(
+    network: str = "mainnet",
     search: str = "",
     protocol: str | None = None,
     x402: bool | None = None,
     verified: bool | None = None,
     sort: str = "score",
 ):
-    query: dict = {"chain_id": 56}
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id, is_testnet = (97, True) if network == "testnet" else (56, False)
+    query: dict = {"chain_id": chain_id, "is_testnet": is_testnet}
     if search:
         query["$or"] = [
             {"name": {"$regex": re.escape(search), "$options": "i"}},
@@ -102,15 +118,41 @@ async def list_onchain_agents(
     sort_map = {"score": ("total_score", -1), "rank": ("rank", 1), "feedback": ("total_feedbacks", -1), "newest": ("created_at", -1)}
     field, direction = sort_map.get(sort, sort_map["score"])
     items = await db.scan_agents.find(query, {"_id": 0, "raw_8004scan": 0}).sort(field, direction).to_list(100)
-    return ScanAgentList(items=items, total=len(items))
+    return ScanAgentList(items=items, total=len(items), chain_id=chain_id, is_testnet=is_testnet)
 
 
 @api.get("/onchain/agents/{token_id}", response_model=ScanAgent, tags=["agents"])
-async def get_onchain_agent(token_id: int):
-    item = await db.scan_agents.find_one({"chain_id": 56, "token_id": token_id}, {"_id": 0, "raw_8004scan": 0})
+async def get_onchain_agent(token_id: int, network: str = "mainnet"):
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id = 97 if network == "testnet" else 56
+    item = await db.scan_agents.find_one({"chain_id": chain_id, "token_id": token_id}, {"_id": 0, "raw_8004scan": 0})
     if not item:
         raise HTTPException(404, "BSC Mainnet agent not found in the synchronized sample")
     return item
+
+
+@api.get("/onchain/agents/{network}/{token_id}/icon", tags=["agents"])
+async def onchain_agent_icon(network: str, token_id: int):
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id = 97 if network == "testnet" else 56
+    content, content_type, is_source = await get_agent_icon(db, chain_id, token_id)
+    return Response(content=content, media_type=content_type, headers={
+        "Cache-Control": "public, max-age=86400",
+        "X-Agent-Icon-Source": "8004scan" if is_source else "generated-fallback",
+    })
+
+
+@api.get("/onchain/feedbacks", response_model=list[ScanFeedback], tags=["agents"])
+async def list_onchain_feedbacks(network: str = "mainnet", agent_id: str | None = None):
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id = 97 if network == "testnet" else 56
+    query: dict = {"chain_id": chain_id}
+    if agent_id:
+        query["agent_id"] = agent_id
+    return await db.scan_feedbacks.find(query, {"_id": 0, "raw_8004scan": 0}).sort("submitted_at", -1).to_list(100)
 
 
 @api.get("/agents", response_model=AgentList, tags=["agents"])

@@ -8,6 +8,7 @@ import type { Agent, Readiness } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { WalletButton } from "@/components/WalletButton";
+import { AgentAvatar } from "@/components/AgentAvatar";
 
 export default function AgentPage() {
   const { agentId } = useParams(); const navigate = useNavigate(); const { address, chainId } = useAccount();
@@ -22,7 +23,7 @@ export default function AgentPage() {
   return <div className="page-wrap agent-detail-page">
     <Link to="/" className="back-link" data-testid="back-to-marketplace"><ArrowLeft size={15} /> Back to marketplace</Link>
     <section className="agent-profile-band">
-      <div className="agent-avatar profile-avatar">{agent.name.split(" ").map(x=>x[0]).join("")}</div><div className="profile-title"><div className="profile-name"><h1 data-testid="agent-detail-name">{agent.name}</h1><span data-testid="agent-detail-status" className={agent.status === "active" ? "status-live" : "status-offline"}>{agent.status === "active" ? "Live" : "Offline"}</span></div><p data-testid="agent-detail-tagline">{agent.tagline}</p><div className="capability-row">{agent.capabilities.map(x=><span key={x}>{x}</span>)}</div></div>
+      <AgentAvatar name={`${agent.name}-${agent.id}`} size={68} testId="agent-detail-avatar" className="profile-avatar"/><div className="profile-title"><div className="profile-name"><h1 data-testid="agent-detail-name">{agent.name}</h1><span data-testid="agent-detail-status" className={agent.status === "active" ? "status-live" : "status-offline"}>{agent.status === "active" ? "Live" : "Offline"}</span></div><p data-testid="agent-detail-tagline">{agent.tagline}</p><div className="capability-row">{agent.capabilities.map(x=><span key={x}>{x}</span>)}</div></div>
       <div className="profile-price"><span>Per research run</span><strong data-testid="agent-detail-price">${agent.price_usd.toFixed(2)}</strong></div>
     </section>
     <div className="detail-layout"><div className="evidence-column">

@@ -1,0 +1,49 @@
+{
+  "summary": "Validated backend+frontend changes on public preview URL for avatar replacement, Binance connector conditional init, and onchain invalid-network validation. All targeted flows passed; backend regression suite now 36/36 passing after adding detail-endpoint invalid-network test.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Frontend production build",
+        "issue": "Build succeeds but emits large third-party source-map warnings including optional '@react-native-async-storage/async-storage' resolution warnings from wallet SDK dependency tree.",
+        "affected_selectors": [
+          "build pipeline"
+        ]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_agentdock_api.py",
+    "/app/backend/tests/test_onchain_8004scan.py",
+    "/app/backend/tests/test_onchain_network_split.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional: reduce noisy wallet/dependency source-map warnings during frontend build for cleaner CI logs.",
+    "Optional: avoid using broad data-testid prefixes like 'onchain-agent-*' for both container and item nodes to keep automation selectors unambiguous."
+  ],
+  "critical_code_review_comments": [
+    "Backend network validation is now consistent for /api/onchain/agents/{token_id}; 400 response for invalid network verified.",
+    "Binance connector conditional initialization in wagmi.ts works as intended: no nbstream websocket console error observed when extension is absent.",
+    "Avatar rollout is deterministic/local SVG-based via AgentAvatar in marketplace, compare, detail, and onchain pages; no remote card image dependency observed in tested flows."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_onchain_network_split.py",
+    "/app/test_reports/iteration_4.json"
+  ],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "98%"
+  },
+  "test_credentials": "Checked /app/memory/test_credentials.md before auth-related testing; file exists but contains no credentials.",
+  "seed_data_creation": "No seed data created.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Public URL tested: https://agent-marketplace-131.preview.emergentagent.com. Backend tests require REACT_APP_BACKEND_URL exported (set -a && source /app/frontend/.env). Pytest result: 36 passed. UI verified: marketplace avatars SVG/no initials/~42px, compare avatars present via data-testid, detail avatar SVG/~68px, wallet menu shows MetaMask + Binance install option when extension absent, onchain mainnet/testnet each render 100 avatar icons (no onchain card <img> usage), and console logs contain no nbstream websocket or mixed-content/CORS image errors.",
+  "rca of the issue": "Previous websocket error RCA confirmed resolved: Binance connector now only added when window.binancew3w.ethereum exists, preventing premature connector bootstrap socket attempts on users without extension."
+}

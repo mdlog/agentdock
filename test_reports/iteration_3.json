@@ -1,0 +1,51 @@
+{
+  "summary": "Executed full backend+frontend verification for AltLayer/8004scan network-split requirements on public URL. Backend API/integration regression passed including new mainnet/testnet, feedback isolation, invalid-network, and persistence checks. Frontend /onchain behavior passed for network switch/reset/counts/links/no-remote-images, but browser console still shows Binance wallet WebSocket errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Onchain page load (global wallet bootstrap)",
+        "issue": "Browser console logs WebSocket connection error to wss://nbstream.binance.click/wallet-connector (ERR_NAME_NOT_RESOLVED).",
+        "affected_selectors": [
+          "[data-testid='onchain-heading']",
+          "[data-testid='onchain-network-filter']"
+        ]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_agentdock_api.py",
+    "/app/backend/tests/test_onchain_8004scan.py",
+    "/app/backend/tests/test_onchain_network_split.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix or silence Binance connector bootstrap error path that still tries unresolved nbstream.binance.click endpoint.",
+    "Keep wallet connector fallback behavior but avoid uncaught error-level console noise to satisfy no-console-errors acceptance.",
+    "Optional hardening: validate `network` in `/api/onchain/agents/{token_id}` for explicit 400 behavior parity with list endpoints."
+  ],
+  "critical_code_review_comments": [
+    "`get_onchain_agent` does not validate invalid network values and also returns a mainnet-specific 404 message even when testnet is requested.",
+    "Frontend globally initializes wallet provider on page load, surfacing third-party websocket failures in console even when wallet flow is unused."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_onchain_network_split.py",
+    "/app/backend/tests/test_onchain_8004scan.py",
+    "/app/test_reports/iteration_3.json"
+  ],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "95%"
+  },
+  "test_credentials": "Checked /app/memory/test_credentials.md before auth testing; file exists but contains no credentials.",
+  "seed_data_creation": "No seed data created.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Public URL tested: https://agent-marketplace-131.preview.emergentagent.com. Pytest result now 35 passed. Verified: mainnet status success (56,false,100 agents,100 feedback sample, available_total 256515), testnet status success (97,true,100 agents,feedback_sample 28,available_total 1785), default /onchain/agents mainnet 100, /onchain/agents?network=testnet exact 100 with chain 97, feedback isolation and no raw/api-key in public response, invalid network returns 400 for status/agents/feedbacks, unique feedback index present, and provider-failure retention tests for both agents+feedbacks.",
+  "rca of the issue": "Reproduction: open /onchain and inspect console. Error appears from vendors-node_modules_binance_w3w-ethereum-provider bundle: websocket to `wss://nbstream.binance.click/wallet-connector` fails with ERR_NAME_NOT_RESOLVED before fallback domains are logged. Mitigation: adjust Binance connector initialization/fallback order, downgrade transient socket failures to handled warnings, or lazy-init wallet connector only when wallet interaction starts."
+}

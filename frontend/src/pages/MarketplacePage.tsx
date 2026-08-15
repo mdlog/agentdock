@@ -29,10 +29,13 @@ export default function MarketplacePage() {
   const { selected, toggle } = useCompare();
 
   useEffect(() => {
-    Promise.all([api.get("/onchain/agents?network=mainnet"), api.get("/agents"), api.get("/integrations/readiness")])
-      .then(([o, a, r]) => { setOnchain(o.data.items); setSeed(a.data.items); setReadiness(r.data); })
+    Promise.all([api.get("/onchain/agents?network=mainnet"), api.get("/agents")])
+      .then(([o, a]) => { setOnchain(o.data.items); setSeed(a.data.items); })
       .catch(() => { setOnchain([]); setSeed([]); })
       .finally(() => setLoading(false));
+    // Readiness drives an advisory banner only; a slow check must never keep the
+    // catalog from rendering.
+    api.get("/integrations/readiness").then(r => setReadiness(r.data)).catch(() => setReadiness(null));
   }, []);
 
   const protocols = useMemo(() => Array.from(new Set(onchain.flatMap(a => a.supported_protocols))).sort(), [onchain]);

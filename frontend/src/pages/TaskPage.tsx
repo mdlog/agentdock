@@ -10,7 +10,13 @@ const stages = ["created", "paid", "running", "completed"];
 export default function TaskPage() {
   const { taskId } = useParams(); const [task, setTask] = useState<Task | null>(null); const [events, setEvents] = useState<AuditEvent[]>([]); const [ready, setReady] = useState<Readiness | null>(null);
   const [loadError, setLoadError] = useState("");
-  useEffect(() => { Promise.all([api.get(`/tasks/${taskId}`), api.get("/integrations/readiness")]).then(([t,r]) => { setTask(t.data.task); setEvents(t.data.audit_events); setReady(r.data); }).catch((error) => setLoadError(messageFromError(error))); }, [taskId]);
+  // Readiness only drives an advisory banner, so it is fetched separately: a slow
+  // or failing check must not hide a task that loaded fine. Leaving it null keeps
+  // payment displayed as locked, which is the safe default.
+  useEffect(() => {
+    api.get(`/tasks/${taskId}`).then(t => { setTask(t.data.task); setEvents(t.data.audit_events); }).catch(error => setLoadError(messageFromError(error)));
+    api.get("/integrations/readiness").then(r => setReady(r.data)).catch(() => setReady(null));
+  }, [taskId]);
   if (loadError) return <div className="page-wrap empty-state" data-testid="task-detail-error"><AlertTriangle size={28}/><h1>Task unavailable</h1><p>{loadError}</p><Button data-testid="task-error-home-button" asChild><Link to="/">Back to marketplace</Link></Button></div>;
   if (!task) return <div className="page-wrap" data-testid="task-loading">Loading task…</div>;
   const current = Math.max(0, stages.indexOf(task.state));

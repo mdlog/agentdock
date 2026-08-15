@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from typing import Any
 
 import boto3
@@ -46,14 +47,35 @@ class ArtifactStore:
         return {"mode": "object_storage", "key": key}
 
 
+RPC_TIMEOUT = 4
+HEALTH_TTL_OK = 300
+HEALTH_TTL_FAIL = 30
+
+# The chain id and the registry bytecode do not change between requests, but
+# readiness is polled by every page load. Without this cache each visit paid two
+# sequential round trips to the RPC, and a slow public endpoint pushed the whole
+# response past the frontend's request timeout.
+_health_cache: tuple[float, tuple[bool, bool]] | None = None
+
+
 async def registry_health() -> tuple[bool, bool]:
+    global _health_cache
+    if _health_cache and time.monotonic() < _health_cache[0]:
+        return _health_cache[1]
+
+    result = (False, False)
     rpc_url = os.environ.get("BSC_RPC_URL")
     registry = os.environ.get("ERC8004_IDENTITY_REGISTRY")
-    if not rpc_url or not registry:
-        return False, False
-    async with httpx.AsyncClient(timeout=8) as client:
-        chain = await client.post(rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []})
-        if chain.json().get("result") != "0x61":
-            return False, False
-        code = await client.post(rpc_url, json={"jsonrpc": "2.0", "id": 2, "method": "eth_getCode", "params": [registry, "latest"]})
-        return True, code.json().get("result", "0x") != "0x"
+    if rpc_url and registry:
+        try:
+            async with httpx.AsyncClient(timeout=RPC_TIMEOUT) as client:
+                chain = await client.post(rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []})
+                if chain.json().get("result") == "0x61":
+                    code = await client.post(rpc_url, json={"jsonrpc": "2.0", "id": 2, "method": "eth_getCode", "params": [registry, "latest"]})
+                    result = (True, code.json().get("result", "0x") != "0x")
+        except (httpx.HTTPError, ValueError):
+            result = (False, False)
+
+    ttl = HEALTH_TTL_OK if result[0] else HEALTH_TTL_FAIL
+    _health_cache = (time.monotonic() + ttl, result)
+    return result

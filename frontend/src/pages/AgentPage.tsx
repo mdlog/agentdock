@@ -16,7 +16,11 @@ export default function AgentPage() {
   const [loadError, setLoadError] = useState("");
   const [objective, setObjective] = useState("Compare three PancakeSwap pools for sustainable yield, including liquidity, volume, impermanent loss, and key risks.");
   const [constraints, setConstraints] = useState("Prefer evidence from the last 30 days. Do not execute transactions or request approvals."); const [creating, setCreating] = useState(false);
-  useEffect(() => { Promise.all([api.get(`/agents/${agentId}`), api.get("/integrations/readiness")]).then(([a,r]) => { setAgent(a.data); setReadiness(r.data); }).catch((error) => setLoadError(messageFromError(error))); }, [agentId]);
+  // Readiness drives an advisory banner only; keep it off the agent's critical path.
+  useEffect(() => {
+    api.get(`/agents/${agentId}`).then(a => setAgent(a.data)).catch(error => setLoadError(messageFromError(error)));
+    api.get("/integrations/readiness").then(r => setReadiness(r.data)).catch(() => setReadiness(null));
+  }, [agentId]);
   if (loadError) return <div className="page-wrap empty-state" data-testid="agent-detail-error"><AlertTriangle size={28}/><h1>Agent evidence unavailable</h1><p>{loadError}</p><Button data-testid="agent-error-back-button" asChild><Link to="/">Back to marketplace</Link></Button></div>;
   if (!agent) return <div className="page-wrap" data-testid="agent-detail-loading">Loading agent evidence…</div>;
   const createTask = async () => { setCreating(true); try { const r = await api.post("/tasks", { agent_id: agent.id, objective, constraints, wallet_address: address || null }); toast.success("Task draft created"); navigate(`/tasks/${r.data.id}`); } catch (e) { toast.error(messageFromError(e)); } finally { setCreating(false); } };

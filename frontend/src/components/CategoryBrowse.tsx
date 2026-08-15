@@ -33,10 +33,12 @@ export const CategoryBrowse = ({ categories, selected, onSelect }: {
             aria-pressed={active}
             onClick={() => onSelect(active ? null : cat.key)}
           >
-            <span className="category-icon"><Icon size={20} /></span>
-            <strong>{cat.label}</strong>
+            <span className="category-top">
+              <span className="category-icon"><Icon size={15} /></span>
+              <strong>{cat.label}</strong>
+              <span className="category-count" data-testid={`category-count-${cat.key}`}>{cat.count.toLocaleString()}</span>
+            </span>
             <p>{cat.blurb}</p>
-            <span className="category-count" data-testid={`category-count-${cat.key}`}>{cat.count.toLocaleString()} agents</span>
           </button>
         );
       })}

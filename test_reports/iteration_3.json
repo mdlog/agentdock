@@ -19,10 +19,10 @@
     "design_issues": []
   },
   "test_report_links": [
-    "/app/backend/tests/test_agentdock_api.py",
-    "/app/backend/tests/test_onchain_8004scan.py",
-    "/app/backend/tests/test_onchain_network_split.py",
-    "/app/test_reports/pytest/pytest_results.xml"
+    "backend/tests/test_agentdock_api.py",
+    "backend/tests/test_onchain_8004scan.py",
+    "backend/tests/test_onchain_network_split.py",
+    "test_reports/pytest/pytest_results.xml"
   ],
   "action_items": [
     "Fix or silence Binance connector bootstrap error path that still tries unresolved nbstream.binance.click endpoint.",
@@ -34,18 +34,18 @@
     "Frontend globally initializes wallet provider on page load, surfacing third-party websocket failures in console even when wallet flow is unused."
   ],
   "updated_files": [
-    "/app/backend/tests/test_onchain_network_split.py",
-    "/app/backend/tests/test_onchain_8004scan.py",
-    "/app/test_reports/iteration_3.json"
+    "backend/tests/test_onchain_network_split.py",
+    "backend/tests/test_onchain_8004scan.py",
+    "test_reports/iteration_3.json"
   ],
   "success_rate": {
     "backend": "100%",
     "frontend": "95%"
   },
-  "test_credentials": "Checked /app/memory/test_credentials.md before auth testing; file exists but contains no credentials.",
+  "test_credentials": "Checked memory/test_credentials.md before auth testing; file exists but contains no credentials.",
   "seed_data_creation": "No seed data created.",
   "retest_needed": true,
   "should_main_agent_self_test": true,
-  "context_for_next_testing_agent": "Public URL tested: https://agent-marketplace-131.preview.emergentagent.com. Pytest result now 35 passed. Verified: mainnet status success (56,false,100 agents,100 feedback sample, available_total 256515), testnet status success (97,true,100 agents,feedback_sample 28,available_total 1785), default /onchain/agents mainnet 100, /onchain/agents?network=testnet exact 100 with chain 97, feedback isolation and no raw/api-key in public response, invalid network returns 400 for status/agents/feedbacks, unique feedback index present, and provider-failure retention tests for both agents+feedbacks.",
+  "context_for_next_testing_agent": "Public URL tested: <preview-deployment-url>. Pytest result now 35 passed. Verified: mainnet status success (56,false,100 agents,100 feedback sample, available_total 256515), testnet status success (97,true,100 agents,feedback_sample 28,available_total 1785), default /onchain/agents mainnet 100, /onchain/agents?network=testnet exact 100 with chain 97, feedback isolation and no raw/api-key in public response, invalid network returns 400 for status/agents/feedbacks, unique feedback index present, and provider-failure retention tests for both agents+feedbacks.",
   "rca of the issue": "Reproduction: open /onchain and inspect console. Error appears from vendors-node_modules_binance_w3w-ethereum-provider bundle: websocket to `wss://nbstream.binance.click/wallet-connector` fails with ERR_NAME_NOT_RESOLVED before fallback domains are logged. Mitigation: adjust Binance connector initialization/fallback order, downgrade transient socket failures to handled warnings, or lazy-init wallet connector only when wallet interaction starts."
 }

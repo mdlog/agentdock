@@ -4,13 +4,15 @@ import hashlib
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 import requests
 
 
-if "/app/backend" not in sys.path:
-    sys.path.append("/app/backend")
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.append(str(BACKEND_DIR))
 
 import icon_proxy
 from icon_proxy import _public_https_url, get_agent_icon

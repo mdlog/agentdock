@@ -18,10 +18,10 @@
     "design_issues": []
   },
   "test_report_links": [
-    "/app/backend/tests/test_agentdock_api.py",
-    "/app/backend/tests/test_onchain_8004scan.py",
-    "/app/backend/tests/test_onchain_network_split.py",
-    "/app/test_reports/pytest/pytest_results.xml"
+    "backend/tests/test_agentdock_api.py",
+    "backend/tests/test_onchain_8004scan.py",
+    "backend/tests/test_onchain_network_split.py",
+    "test_reports/pytest/pytest_results.xml"
   ],
   "action_items": [
     "Optional: reduce noisy wallet/dependency source-map warnings during frontend build for cleaner CI logs.",
@@ -33,17 +33,17 @@
     "Avatar rollout is deterministic/local SVG-based via AgentAvatar in marketplace, compare, detail, and onchain pages; no remote card image dependency observed in tested flows."
   ],
   "updated_files": [
-    "/app/backend/tests/test_onchain_network_split.py",
-    "/app/test_reports/iteration_4.json"
+    "backend/tests/test_onchain_network_split.py",
+    "test_reports/iteration_4.json"
   ],
   "success_rate": {
     "backend": "100%",
     "frontend": "98%"
   },
-  "test_credentials": "Checked /app/memory/test_credentials.md before auth-related testing; file exists but contains no credentials.",
+  "test_credentials": "Checked memory/test_credentials.md before auth-related testing; file exists but contains no credentials.",
   "seed_data_creation": "No seed data created.",
   "retest_needed": false,
   "should_main_agent_self_test": true,
-  "context_for_next_testing_agent": "Public URL tested: https://agent-marketplace-131.preview.emergentagent.com. Backend tests require REACT_APP_BACKEND_URL exported (set -a && source /app/frontend/.env). Pytest result: 36 passed. UI verified: marketplace avatars SVG/no initials/~42px, compare avatars present via data-testid, detail avatar SVG/~68px, wallet menu shows MetaMask + Binance install option when extension absent, onchain mainnet/testnet each render 100 avatar icons (no onchain card <img> usage), and console logs contain no nbstream websocket or mixed-content/CORS image errors.",
+  "context_for_next_testing_agent": "Public URL tested: <preview-deployment-url>. Backend tests require REACT_APP_BACKEND_URL exported (set -a && source frontend/.env). Pytest result: 36 passed. UI verified: marketplace avatars SVG/no initials/~42px, compare avatars present via data-testid, detail avatar SVG/~68px, wallet menu shows MetaMask + Binance install option when extension absent, onchain mainnet/testnet each render 100 avatar icons (no onchain card <img> usage), and console logs contain no nbstream websocket or mixed-content/CORS image errors.",
   "rca of the issue": "Previous websocket error RCA confirmed resolved: Binance connector now only added when window.binancew3w.ethereum exists, preventing premature connector bootstrap socket attempts on users without extension."
 }

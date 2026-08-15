@@ -11,8 +11,9 @@ from dotenv import dotenv_values
 from pymongo import MongoClient
 
 
-if "/app/backend" not in sys.path:
-    sys.path.append("/app/backend")
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.append(str(BACKEND_DIR))
 
 from scan8004 import Scan8004Error, Scan8004Client, sync_bsc_mainnet, sync_feedbacks
 
@@ -21,8 +22,7 @@ BASE_URL = os.environ.get("REACT_APP_BACKEND_URL")
 
 
 def _load_backend_env() -> dict:
-    env_file = Path("/app/backend/.env")
-    return dotenv_values(env_file)
+    return dotenv_values(BACKEND_DIR / ".env")
 
 
 def _contains_forbidden_keys(value):

@@ -13,8 +13,11 @@ from pymongo import MongoClient
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL")
 
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+
 def _load_backend_env() -> dict:
-    return dotenv_values(Path("/app/backend/.env"))
+    return dotenv_values(BACKEND_DIR / ".env")
 
 
 @pytest.fixture(scope="session")

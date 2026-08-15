@@ -67,6 +67,9 @@ chainlit.md
 # Deployment
 .vercel
 
+# Platform-injected build/runtime metadata
+.emergent/
+
 # Data and databases
 agenthub/agents/youtube/db
 

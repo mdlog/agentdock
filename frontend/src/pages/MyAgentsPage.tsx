@@ -1,0 +1,22 @@
+import { useEffect, useState } from "react";
+import { ArrowUpRight, Bot, ExternalLink, Plus, ShieldCheck } from "lucide-react";
+import { Link } from "react-router-dom";
+import { useAccount } from "wagmi";
+import { api, messageFromError } from "@/lib/api";
+import { AgentAvatar } from "@/components/AgentAvatar";
+import { WalletButton } from "@/components/WalletButton";
+import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { scanAgentUrl } from "@/lib/erc8004";
+
+type OwnedAgent={id:string;chain_id:number;token_id:number;name:string;description:string;has_source_icon:boolean;supported_protocols:string[];x402_supported:boolean;is_verified:boolean;total_score?:number;source_label:string};
+
+export default function MyAgentsPage(){
+  const {address}=useAccount(); const [network,setNetwork]=useState<"mainnet"|"testnet">("mainnet"); const [items,setItems]=useState<OwnedAgent[]>([]); const [loading,setLoading]=useState(false); const [error,setError]=useState("");
+  useEffect(()=>{if(!address){setItems([]);return}setLoading(true);api.get(`/my-agents/${address}?network=${network}`).then(r=>{setItems(r.data.items);setError("")}).catch(e=>setError(messageFromError(e))).finally(()=>setLoading(false))},[address,network]);
+  const backend=process.env.REACT_APP_BACKEND_URL;
+  return <div className="page-wrap my-agents-page"><div className="page-heading"><div><p className="section-kicker">Wallet-owned identities</p><h1 data-testid="my-agents-heading">My Agents</h1><p data-testid="my-agents-subheading">Agent identities owned by your connected wallet, indexed by 8004scan.</p></div><div className="my-agent-actions"><Select value={network} onValueChange={(v:any)=>setNetwork(v)}><SelectTrigger data-testid="my-agents-network-select"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="mainnet">BSC Mainnet</SelectItem><SelectItem value="testnet">BSC Testnet</SelectItem></SelectContent></Select>{address&&<Button data-testid="register-agent-button" asChild><Link to="/my-agents/new"><Plus size={15}/> Register agent</Link></Button>}</div></div>
+    {!address?<section className="wallet-empty" data-testid="my-agents-connect-state"><Bot size={34}/><h2>Connect the owner wallet</h2><p>AgentDock will query ownership through 8004scan without requesting a signature.</p><WalletButton/></section>:<><div className="owner-strip" data-testid="my-agents-owner"><ShieldCheck size={15}/><span>Owner wallet</span><strong>{address}</strong><em>{items.length} agents on {network}</em></div>{error&&<div className="integration-notice" data-testid="my-agents-error"><strong>{error}</strong></div>}{loading?<div className="owned-grid" data-testid="my-agents-loading">{[1,2,3].map(x=><Skeleton className="h-64" key={x}/>)}</div>:items.length?<div className="owned-grid" data-testid="my-agents-grid">{items.map(agent=><article className="owned-card" data-testid={`owned-agent-${agent.token_id}`} key={agent.id}><div className="owned-card-head"><AgentAvatar name={`${agent.chain_id}-${agent.token_id}-${agent.name}`} src={agent.has_source_icon?`${backend}/api/onchain/agents/${network}/${agent.token_id}/icon`:undefined} testId={`owned-agent-avatar-${agent.token_id}`}/><div><h2 data-testid={`owned-agent-name-${agent.token_id}`}>{agent.name}</h2><span>ERC-8004 #{agent.token_id}</span></div></div><p>{agent.description}</p><div className="protocol-list">{agent.supported_protocols.map(p=><span key={p}>{p}</span>)}</div><div className="owned-card-meta"><span>8004scan score <strong>{agent.total_score??"—"}</strong></span><span>{agent.x402_supported?"x402 claimed":"No x402 claim"}</span></div><div className="owned-card-actions"><Button data-testid={`owned-agent-detail-${agent.token_id}`} asChild><Link to={`/onchain/${network}/${agent.token_id}`}>View details <ArrowUpRight size={14}/></Link></Button><a data-testid={`owned-agent-manage-${agent.token_id}`} href={scanAgentUrl(network,agent.token_id)} target="_blank" rel="noreferrer" aria-label="Manage on 8004scan"><ExternalLink size={15}/></a></div></article>)}</div>:<div className="wallet-empty" data-testid="my-agents-empty"><Bot size={30}/><h2>No owned agents found</h2><p>Register a new ERC-8004 identity or switch networks.</p><Button asChild><Link to="/my-agents/new">Register first agent</Link></Button></div>}</>}
+  </div>;
+}

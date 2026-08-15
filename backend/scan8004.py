@@ -96,6 +96,28 @@ class Scan8004Client:
         valid = [row for row in data if row.get("chain_id") == chain_id and row.get("is_testnet") is is_testnet]
         return valid, pagination
 
+    async def owned_agents(self, address: str, page: int = 1, limit: int = 100) -> tuple[list[dict], dict]:
+        response = await self._get(f"/accounts/{address}/agents", {"page": page, "limit": limit, "sortBy": "created_at", "sortOrder": "desc"})
+        try:
+            payload = response.json()
+            return payload["data"], payload["meta"]["pagination"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise Scan8004Error("Malformed 8004scan ownership response") from exc
+
+    async def agent_detail(self, chain_id: int, token_id: int) -> dict:
+        response = await self._get(f"/agents/{chain_id}/{token_id}", {})
+        try:
+            return response.json()["data"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise Scan8004Error("Malformed 8004scan detail response") from exc
+
+    async def agent_feedbacks(self, chain_id: int, token_id: int, limit: int = 20) -> list[dict]:
+        response = await self._get("/feedbacks", {"page": 1, "limit": limit, "chainId": chain_id, "tokenId": token_id})
+        try:
+            return response.json()["data"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise Scan8004Error("Malformed 8004scan feedback detail response") from exc
+
 
 def public_projection(raw: dict, chain_id: int, is_testnet: bool) -> dict:
     token_id = int(raw["token_id"])
@@ -124,6 +146,64 @@ def public_projection(raw: dict, chain_id: int, is_testnet: bool) -> dict:
         "updated_at": raw.get("updated_at"),
         "source": SOURCE,
         "source_label": f"8004scan · BSC {'Testnet' if is_testnet else 'Mainnet'}",
+    }
+
+
+def detail_projection(raw: dict) -> dict:
+    chain_id = int(raw["chain_id"])
+    token_id = int(raw["token_id"])
+    return {
+        **public_projection(raw, chain_id, bool(raw.get("is_testnet"))),
+        "agent_id": raw.get("agent_id"),
+        "creator_address": raw.get("creator_address"),
+        "agent_wallet": raw.get("agent_wallet"),
+        "agent_type": raw.get("agent_type"),
+        "tags": raw.get("tags") or [],
+        "categories": raw.get("categories") or [],
+        "services": raw.get("services") or {},
+        "scores": raw.get("scores") or {},
+        "quality_score": raw.get("quality_score"),
+        "popularity_score": raw.get("popularity_score"),
+        "activity_score": raw.get("activity_score"),
+        "wallet_score": raw.get("wallet_score"),
+        "freshness_score": raw.get("freshness_score"),
+        "metadata_completeness_score": raw.get("metadata_completeness_score"),
+        "supported_trust_models": raw.get("supported_trust_models") or [],
+        "health_status": raw.get("health_status") or {},
+        "health_checked_at": raw.get("health_checked_at"),
+        "is_endpoint_verified": bool(raw.get("is_endpoint_verified")),
+        "endpoint_verified_domain": raw.get("endpoint_verified_domain"),
+        "endpoint_verification_error": raw.get("endpoint_verification_error"),
+        "is_active": raw.get("is_active"),
+        "total_validations": raw.get("total_validations") or 0,
+        "successful_validations": raw.get("successful_validations") or 0,
+        "created_block_number": raw.get("created_block_number"),
+        "created_tx_hash": raw.get("created_tx_hash"),
+        "cross_chain_links": raw.get("cross_chain_links") or [],
+        "cross_chain_versions": raw.get("cross_chain_versions") or [],
+        "raw_metadata": raw.get("raw_metadata") or {},
+        "field_sources": raw.get("field_sources") or {},
+        "parse_status": raw.get("parse_status") or {},
+        "ens": raw.get("ens"),
+        "did": raw.get("did"),
+        "mcp_server": raw.get("mcp_server"),
+        "mcp_version": raw.get("mcp_version"),
+        "a2a_endpoint": raw.get("a2a_endpoint"),
+        "a2a_version": raw.get("a2a_version"),
+        "agent_url": raw.get("agent_url"),
+    }
+
+
+def feedback_projection(raw: dict) -> dict:
+    return {
+        "feedback_id": str(raw.get("feedback_id") or raw.get("id")),
+        "score": raw.get("score"),
+        "comment": raw.get("comment"),
+        "transaction_hash": raw.get("transaction_hash"),
+        "user_address": raw.get("user_address"),
+        "tags": [tag for tag in (raw.get("tag1"), raw.get("tag2")) if tag],
+        "is_revoked": bool(raw.get("is_revoked")),
+        "submitted_at": raw.get("submitted_at") or raw.get("created_at"),
     }
 
 

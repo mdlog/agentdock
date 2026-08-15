@@ -6,6 +6,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 
 type LiveAgent = { id:string; chain_id:number; is_testnet:boolean; token_id:number; name:string; description:string; image_url?:string; has_source_icon:boolean; owner_address?:string; contract_address?:string; supported_protocols:string[]; x402_supported:boolean; is_verified:boolean; total_score?:number; rank?:number; health_score?:number; total_feedbacks:number; average_score?:number; source_label:string; synced_at:string };
 type SyncStatus = { status:string; imported?:number; feedback_sample?:number; available_total?:number; sample_limit?:number; completed_at?:string; rate_limit?:{limit?:string;remaining?:string}; error?:string };
@@ -37,7 +39,7 @@ export default function OnchainPage() {
       <div className="onchain-card-top"><AgentAvatar name={`${agent.chain_id}-${agent.token_id}-${agent.name}`} testId={`onchain-avatar-${agent.token_id}`} src={agent.has_source_icon?`${backendUrl}/api/onchain/agents/${network}/${agent.token_id}/icon`:undefined}/><div><div className="onchain-name"><h2 data-testid={`onchain-name-${agent.token_id}`}>{agent.name}</h2>{agent.is_verified&&<BadgeCheck size={15}/>}</div><span data-testid={`onchain-id-${agent.token_id}`}>ERC-8004 #{agent.token_id}</span></div>{agent.x402_supported&&<Badge data-testid={`onchain-x402-${agent.token_id}`} className="x402-badge"><Zap size={10}/> x402 claim</Badge>}</div>
       <p data-testid={`onchain-description-${agent.token_id}`}>{agent.description}</p><div className="protocol-list" data-testid={`onchain-protocols-${agent.token_id}`}>{agent.supported_protocols.length?agent.supported_protocols.map(p=><span key={p}>{p}</span>):<span>No protocol declared</span>}</div>
       <div className="onchain-metrics"><div><strong data-testid={`onchain-score-${agent.token_id}`}>{agent.total_score ?? "—"}</strong><span>8004scan score</span></div><div><strong data-testid={`onchain-rank-${agent.token_id}`}>{agent.rank ? `#${agent.rank}` : "—"}</strong><span>Network rank</span></div><div><strong data-testid={`onchain-feedback-${agent.token_id}`}>{compact(agent.total_feedbacks)}</strong><span>Feedbacks</span></div></div>
-      <div className="onchain-footer"><span><Activity size={12}/>{agent.source_label}</span>{agent.contract_address&&<a data-testid={`onchain-contract-${agent.token_id}`} href={`${agent.is_testnet ? "https://testnet.bscscan.com" : "https://bscscan.com"}/address/${agent.contract_address}`} target="_blank" rel="noreferrer" aria-label="View contract on BscScan"><ExternalLink size={14}/></a>}</div>
+      <div className="onchain-footer"><span><Activity size={12}/>{agent.source_label}</span><div><Button data-testid={`onchain-detail-${agent.token_id}`} variant="ghost" size="sm" asChild><Link to={`/onchain/${network}/${agent.token_id}`}>Details</Link></Button>{agent.contract_address&&<a data-testid={`onchain-contract-${agent.token_id}`} href={`${agent.is_testnet ? "https://testnet.bscscan.com" : "https://bscscan.com"}/address/${agent.contract_address}`} target="_blank" rel="noreferrer" aria-label="View contract on BscScan"><ExternalLink size={14}/></a>}</div></div>
     </article>)}</div>}
   </div>;
 }

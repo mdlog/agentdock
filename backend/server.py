@@ -11,7 +11,7 @@ from starlette.middleware.cors import CORSMiddleware
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import Agent, AgentList, AuditEvent, CompareRequest, FeedbackRequest, IntegrationReadiness, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
-from scan8004 import sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
+from scan8004 import Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
 from icon_proxy import get_agent_icon
 
 
@@ -153,6 +153,59 @@ async def list_onchain_feedbacks(network: str = "mainnet", agent_id: str | None 
     if agent_id:
         query["agent_id"] = agent_id
     return await db.scan_feedbacks.find(query, {"_id": 0, "raw_8004scan": 0}).sort("submitted_at", -1).to_list(100)
+
+
+@api.get("/my-agents/{address}", tags=["agents"])
+async def my_agents(address: str, network: str = "mainnet"):
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", address):
+        raise HTTPException(400, "A valid EVM wallet address is required")
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id, is_testnet = (97, True) if network == "testnet" else (56, False)
+    try:
+        rows, pagination = await Scan8004Client().owned_agents(address)
+        filtered = [row for row in rows if row.get("chain_id") == chain_id and row.get("is_testnet") is is_testnet]
+        items = []
+        for raw in filtered:
+            item = public_projection(raw, chain_id, is_testnet)
+            items.append(item)
+            await db.scan_agents.update_one(
+                {"chain_id": chain_id, "token_id": item["token_id"]},
+                {"$set": {**item, "raw_8004scan": raw, "synced_at": now_iso()}},
+                upsert=True,
+            )
+        return {"items": items, "total": len(items), "upstream_total": pagination.get("total", len(items)), "network": network, "owner_address": address, "source": "8004scan"}
+    except Scan8004Error:
+        cached = await db.scan_agents.find({"chain_id": chain_id, "owner_address": {"$regex": f"^{re.escape(address)}$", "$options": "i"}}, {"_id": 0, "raw_8004scan": 0, "raw_8004scan_detail": 0}).to_list(100)
+        return {"items": cached, "total": len(cached), "upstream_total": None, "network": network, "owner_address": address, "source": "last_known_good", "degraded": True}
+
+
+@api.get("/onchain/agent-details/{network}/{token_id}", tags=["agents"])
+async def onchain_agent_detail(network: str, token_id: int):
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id, is_testnet = (97, True) if network == "testnet" else (56, False)
+    raw = None
+    source = "8004scan_live"
+    try:
+        client = Scan8004Client()
+        raw = await client.agent_detail(chain_id, token_id)
+        feedbacks = [feedback_projection(row) for row in await client.agent_feedbacks(chain_id, token_id)]
+        summary = public_projection(raw, chain_id, is_testnet)
+        await db.scan_agents.update_one(
+            {"chain_id": chain_id, "token_id": token_id},
+            {"$set": {**summary, "raw_8004scan": raw, "raw_8004scan_detail": raw, "synced_at": now_iso()}},
+            upsert=True,
+        )
+    except Scan8004Error:
+        cached = await db.scan_agents.find_one({"chain_id": chain_id, "token_id": token_id}, {"_id": 0})
+        if not cached:
+            raise HTTPException(404, "Agent not found")
+        raw = cached.get("raw_8004scan_detail") or cached.get("raw_8004scan")
+        feedback_rows = await db.scan_feedbacks.find({"chain_id": chain_id, "agent_id": raw.get("agent_id")}, {"_id": 0, "raw_8004scan": 0}).sort("submitted_at", -1).to_list(20)
+        feedbacks = [feedback_projection(row) for row in feedback_rows]
+        source = "last_known_good"
+    return {"agent": detail_projection(raw), "feedbacks": feedbacks, "source": source, "fetched_at": now_iso()}
 
 
 @api.get("/agents", response_model=AgentList, tags=["agents"])

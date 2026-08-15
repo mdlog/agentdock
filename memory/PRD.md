@@ -100,6 +100,14 @@ Monitors onchain identity, endpoint health, task state, payment reconciliation, 
 - Replaced text initials with deterministic local identicon artwork across marketplace cards, comparisons, detail views, and both Onchain networks.
 - Restored original 8004scan agent icons through a backend-only HTTPS proxy with DNS/private-IP SSRF checks, MIME/size limits, MongoDB caching, and identicon fallback.
 - Validated the icon proxy, source/fallback rendering, cache behavior, network isolation, and SSRF defenses with a total backend regression count of 47 passing tests.
+
+### 2026-08-15 — My Agents and complete agent detail
+
+- Added wallet-owned agent lookup through the authenticated 8004scan account endpoint for BSC Mainnet and Testnet, with cached fallback.
+- Added complete onchain agent detail routes and UI for owner, registry, services, endpoints, x402, health, source scores, rank, feedback, validations, and provenance.
+- Added direct ERC-8004 registration and owner-gated `setAgentURI` metadata editing with chain switching, contract simulation, explicit transaction preview, and wallet-signed writes.
+- Metadata is encoded as a self-contained registration `data:` URI, avoiding unavailable object storage; Mainnet requires an additional explicit risk confirmation.
+- Added verified 8004scan create/manage deep links and preserved read-only access for disconnected or non-owner visitors.
 - Made Binance Wallet connector lazy: it initializes only when the extension is present, preventing background websocket errors for other visitors.
 
 ## Current integration status

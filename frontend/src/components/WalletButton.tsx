@@ -18,7 +18,7 @@ export const WalletButton = () => {
     <DropdownMenu>
       <DropdownMenuTrigger asChild><Button data-testid="connected-wallet-menu" variant="outline" className="wallet-button"><span className="wallet-dot" />{short}</Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        {chainId !== 97 && <DropdownMenuItem data-testid="switch-bsc-testnet" onClick={() => switchChain({ chainId: bscTestnet.id })}>Switch to BSC Testnet</DropdownMenuItem>}
+        {![56,97].includes(chainId||0) && <DropdownMenuItem data-testid="switch-bsc-testnet" onClick={() => switchChain({ chainId: bscTestnet.id })}>Switch to BSC Testnet</DropdownMenuItem>}
         <DropdownMenuItem data-testid="disconnect-wallet" onClick={() => disconnect()}><LogOut size={15} /> Disconnect</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

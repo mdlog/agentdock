@@ -1,0 +1,111 @@
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+TaskState = Literal["created", "payment_pending", "paid", "running", "completed", "failed", "refunded", "manual_resolution"]
+
+
+class MetricSet(BaseModel):
+    success_rate: float
+    uptime_pct: float
+    latency_sec: int
+    task_volume: int
+    recency_score: float
+    feedback_score: float
+    reputation_score: float
+
+
+class OnchainIdentity(BaseModel):
+    chain_id: int = 97
+    registry: str
+    agent_id: int
+    metadata_verified: bool
+    endpoint_verified: bool
+    source: str = "ERC-8004 registration"
+
+
+class Agent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    name: str
+    tagline: str
+    description: str
+    category: str
+    capabilities: list[str]
+    price_usd: float
+    status: Literal["active", "offline"]
+    metrics: MetricSet
+    identity: OnchainIdentity
+    output_schema: list[str]
+    updated_at: str
+
+
+class AgentList(BaseModel):
+    items: list[Agent]
+    total: int
+    categories: list[str]
+
+
+class CompareRequest(BaseModel):
+    agent_ids: list[str] = Field(min_length=2, max_length=3)
+
+
+class TaskCreate(BaseModel):
+    agent_id: str
+    objective: str = Field(min_length=12, max_length=1000)
+    constraints: str = Field(default="", max_length=600)
+    wallet_address: str | None = None
+
+
+class TaskRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    agent_id: str
+    agent_name: str
+    objective: str
+    constraints: str
+    wallet_address: str | None
+    state: TaskState
+    estimated_price_usd: float
+    quote_id: str | None = None
+    quote_expires_at: str | None = None
+    tx_hash: str | None = None
+    result: dict[str, Any] | None = None
+    created_at: str
+    updated_at: str
+
+
+class AuditEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    task_id: str
+    event: str
+    detail: str
+    created_at: str
+
+
+class TaskDetail(BaseModel):
+    task: TaskRecord
+    audit_events: list[AuditEvent]
+
+
+class QuoteRequest(BaseModel):
+    payer: str
+
+
+class FeedbackRequest(BaseModel):
+    useful: bool
+    note: str = Field(default="", max_length=500)
+
+
+class IntegrationReadiness(BaseModel):
+    chain_id: int
+    registry_configured: bool
+    rpc_reachable: bool
+    registry_has_code: bool
+    b402_ready: bool
+    agent_endpoints_ready: bool
+    object_storage_ready: bool
+    storage_mode: str
+    notes: list[str]

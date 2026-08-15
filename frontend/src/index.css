@@ -1,0 +1,20 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 25% 98%; --foreground: 216 30% 10%; --card: 0 0% 100%; --card-foreground: 216 30% 10%;
+    --popover: 0 0% 100%; --popover-foreground: 216 30% 10%; --primary: 215 32% 12%; --primary-foreground: 0 0% 100%;
+    --secondary: 210 20% 94%; --secondary-foreground: 216 30% 10%; --muted: 210 20% 95%; --muted-foreground: 215 12% 42%;
+    --accent: 47 96% 56%; --accent-foreground: 215 32% 12%; --destructive: 0 72% 51%; --destructive-foreground: 0 0% 100%;
+    --border: 214 18% 86%; --input: 214 18% 82%; --ring: 47 96% 50%; --radius: .45rem;
+  }
+  * { @apply border-border; }
+  html { scroll-behavior: smooth; }
+  body { @apply bg-background text-foreground; margin: 0; font-family: 'DM Sans', sans-serif; letter-spacing: 0; background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,.06) 1px, transparent 0); background-size: 24px 24px; }
+  h1,h2,h3,strong,.brand { font-family: 'Manrope', sans-serif; letter-spacing: 0; }
+  button,a,input,textarea { font: inherit; }
+  ::selection { background: #facc15; color: #111827; }
+}

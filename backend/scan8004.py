@@ -38,6 +38,20 @@ class Scan8004Client:
         self.api_key = os.environ["SCAN8004_API_KEY"]
         self.timeout = httpx.Timeout(45, connect=8)
 
+    def _headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+        if self.api_key:
+            # 8004scan's docs and OpenAPI spec both say X-API-Key, but as of
+            # 2026-08-15 the deployed API ignores that header everywhere and
+            # honors the key only as an Authorization bearer token on /api/v1/*
+            # (measured: bearer lifts limits from 180/min to 3000/min, a bogus
+            # bearer falls back to anonymous, X-API-Key never changes anything).
+            # Send both: the working transport now, the documented one for the
+            # day they fix it.
+            headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-API-Key"] = self.api_key
+        return headers
+
     async def _get(self, path: str, params: dict[str, Any], base: str | None = None) -> httpx.Response:
         for attempt in range(3):
             try:
@@ -45,7 +59,7 @@ class Scan8004Client:
                     response = await http.get(
                         f"{base or self.base_url}{path}",
                         params=params,
-                        headers={"X-API-Key": self.api_key, "Accept": "application/json", "User-Agent": USER_AGENT},
+                        headers=self._headers(),
                     )
                 if response.status_code == 429:
                     if attempt == 2:
@@ -298,7 +312,7 @@ async def _sync_agents(db, chain_id: int, is_testnet: bool) -> dict:
 FULL_SYNC_SOURCE = "8004scan_full"
 
 
-async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int = 100, pace: float = 0.4, concurrency: int = 4, start_offset: int = 0) -> dict:
+async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int = 100, pace: float = 0.4, concurrency: int = 6, start_offset: int = 0) -> dict:
     """Ingest every agent on one chain, not just the first ranked page.
 
     Pages are fetched `concurrency` at a time. Sequentially this managed only
@@ -316,6 +330,10 @@ async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
     await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": utc_now(), "error": None}}, upsert=True)
 
     client = Scan8004Client()
+    # Deep-offset pages are compute-bound on their side: ~30-45s each past
+    # offset ~100k. The default 45s budget turned that into spurious failures;
+    # the authenticated tier makes patience cheap.
+    client.timeout = httpx.Timeout(120, connect=10)
     imported, offset, available = 0, start_offset, None
     try:
         while True:

@@ -12,7 +12,7 @@ import b402
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import Agent, AgentList, AuditEvent, AuthorizeRequest, CompareRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
-from scan8004 import Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
+from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
 from icon_proxy import get_agent_icon
 
 
@@ -52,6 +52,9 @@ async def startup() -> None:
     await db.scan_agents.create_index([("chain_id", 1), ("total_score", -1)])
     await db.scan_agents.create_index([("chain_id", 1), ("rank", 1)])
     await db.scan_agents.create_index([("chain_id", 1), ("total_feedbacks", -1)])
+    # Category browse is the marketplace's primary journey; index it with the
+    # score sort so a filtered page never scans the collection.
+    await db.scan_agents.create_index([("chain_id", 1), ("categories", 1), ("total_score", -1)])
     await db.sync_runs.create_index([("source", 1), ("chain_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("feedback_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("agent_id", 1), ("submitted_at", -1)])
@@ -177,11 +180,26 @@ async def scan_status(network: str = "mainnet"):
     return {**result, "feedback_sample": feedback_count, "stored_agents": stored, "full_sync": full or {"status": "never_run"}}
 
 
+@api.get("/categories", tags=["agents"])
+async def list_categories(network: str = "mainnet"):
+    """The four judged agent categories with live counts of real agents in each."""
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id = 97 if network == "testnet" else 56
+    items = []
+    for cat in AGENT_CATEGORIES:
+        count = await db.scan_agents.count_documents({"chain_id": chain_id, "categories": cat["key"]})
+        items.append({"key": cat["key"], "label": cat["label"], "blurb": cat["blurb"], "count": count})
+    total_tagged = await db.scan_agents.count_documents({"chain_id": chain_id, "categories": {"$ne": []}})
+    return {"categories": items, "total_categorized": total_tagged, "network": network, "chain_id": chain_id}
+
+
 @api.get("/onchain/agents", response_model=ScanAgentList, tags=["agents"])
 async def list_onchain_agents(
     network: str = "mainnet",
     search: str = "",
     protocol: str | None = None,
+    category: str | None = None,
     x402: bool | None = None,
     verified: bool | None = None,
     sort: str = "score",
@@ -192,6 +210,8 @@ async def list_onchain_agents(
         raise HTTPException(400, "network must be mainnet or testnet")
     chain_id, is_testnet = (97, True) if network == "testnet" else (56, False)
     query: dict = {"chain_id": chain_id, "is_testnet": is_testnet}
+    if category:
+        query["categories"] = category
     if search:
         query["$or"] = [
             {"name": {"$regex": re.escape(search), "$options": "i"}},

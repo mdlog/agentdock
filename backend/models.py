@@ -137,6 +137,7 @@ class ScanAgent(BaseModel):
     owner_address: str | None = None
     contract_address: str | None = None
     supported_protocols: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
     x402_supported: bool
     is_verified: bool
     total_score: float | None = None

@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from scan8004 import derive_categories
+
 BAZAAR_BASE = "https://www.binance.com/bapi/ramp/v1/public/ramp/b402"
 BSC_NETWORK = "eip155:56"
 BSC_CHAIN_ID = 56
@@ -244,6 +246,7 @@ def bazaar_projection(item: dict[str, Any]) -> dict[str, Any] | None:
     if not accepts:
         return None
     host = (urlparse(resource).hostname or "").lower()
+    description = item.get("description") or ""
     # Stable across processes: str.__hash__ is salted per interpreter run, so an
     # id built from it would change on every restart and break stored task links.
     return {
@@ -251,7 +254,10 @@ def bazaar_projection(item: dict[str, Any]) -> dict[str, Any] | None:
         "resource": resource,
         "host": host,
         "type": item.get("type"),
-        "description": item.get("description") or "",
+        "description": description,
+        # Same four-category taxonomy as the onchain identities, so a category
+        # selected in the marketplace can surface the hireable services in it.
+        "categories": derive_categories(host, description),
         "x402_version": item.get("x402Version"),
         "listed_assets": sorted({a.get("asset") for a in accepts if a.get("asset")}),
         "pay_to": sorted({a.get("payTo") for a in accepts if a.get("payTo")}),

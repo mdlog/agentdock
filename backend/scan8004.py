@@ -2,12 +2,37 @@ import asyncio
 from datetime import datetime, timezone
 import os
 import random
+import re
 from typing import Any
 
 import httpx
 
 
 SOURCE = "8004scan"
+
+# The four agent categories the BNB Agent Studio marketplace is judged on. Each
+# is derived from an agent's own on-chain name/description — real registered
+# agents that say they do this work — never invented. The patterns are kept
+# reasonably tight; grid especially, since the bare word "grid" over-matches.
+AGENT_CATEGORIES = [
+    {"key": "rebalancing", "label": "Rebalancing", "blurb": "Manages LP ranges and resets positions automatically.",
+     "pattern": r"rebalanc|reset(ting)? position|lp range|concentrated liquidity|\bclmm\b|position manager|range order"},
+    {"key": "grid-trading", "label": "Grid Trading", "blurb": "Places and manages automated grid orders.",
+     # \bgrid\b (not a substring) so "hybrid" et al. do not match, but a
+     # "Grid-*.agent" or a bot that mentions grid/DCA does — these are real
+     # grid-trading agents in a DeFi registry.
+     "pattern": r"\bgrid\b|\bdca\b|dollar[ -]?cost|automated (order|trading)"},
+    {"key": "yield-optimisation", "label": "Yield Optimisation", "blurb": "Routes liquidity to the highest available APR.",
+     "pattern": r"yield|\bapr\b|\bapy\b|farming|optimi[sz]|auto[ -]?compound|vault|staking reward|liquidity mining"},
+    {"key": "health-factor", "label": "Health Factor Monitoring", "blurb": "Protects lending positions from liquidation.",
+     "pattern": r"health factor|liquidation|collateral|\bltv\b|lending position|loan[ -]?to[ -]?value|borrow position|margin call"},
+]
+_CATEGORY_RES = [(c["key"], re.compile(c["pattern"], re.IGNORECASE)) for c in AGENT_CATEGORIES]
+
+
+def derive_categories(name: str | None, description: str | None) -> list[str]:
+    text = f"{name or ''} {description or ''}"
+    return [key for key, rx in _CATEGORY_RES if rx.search(text)]
 MAINNET_CHAIN_ID = 56
 TESTNET_CHAIN_ID = 97
 
@@ -71,7 +96,13 @@ class Scan8004Client:
                 if response.status_code in (408, 500, 502, 503, 504) and attempt < 2:
                     await asyncio.sleep(min(2 ** attempt, 8) + random.random())
                     continue
-                response.raise_for_status()
+                # raise_for_status raises httpx.HTTPStatusError, which callers do
+                # not catch — a missing token (upstream 404) then escaped as a
+                # bare 500 from the route. Convert every error status here so it
+                # surfaces as a Scan8004Error the routes already handle (falling
+                # back to cache, then 404).
+                if response.status_code >= 400:
+                    raise Scan8004Error(f"8004scan returned HTTP {response.status_code}")
                 return response
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt == 2:
@@ -178,13 +209,18 @@ class Scan8004Client:
 
 def public_projection(raw: dict, chain_id: int, is_testnet: bool) -> dict:
     token_id = int(raw["token_id"])
+    name = raw.get("name") or f"ERC-8004 Agent #{token_id}"
+    description = raw.get("description") or "No public description supplied."
     return {
         "id": f"bsc-{chain_id}-{token_id}",
         "chain_id": chain_id,
         "is_testnet": is_testnet,
         "token_id": token_id,
-        "name": raw.get("name") or f"ERC-8004 Agent #{token_id}",
-        "description": raw.get("description") or "No public description supplied.",
+        "name": name,
+        "description": description,
+        # Derived from the agent's own metadata so new syncs are tagged without a
+        # backfill. Real agents, real self-description — see derive_categories.
+        "categories": derive_categories(name, description),
         # Keep remote image claims only in raw_8004scan. Public cards use local
         # initials so untrusted localhost/http/CORS origins are never loaded.
         "image_url": None,

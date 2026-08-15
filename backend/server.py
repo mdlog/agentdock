@@ -8,8 +8,9 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
+import b402
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
-from models import Agent, AgentList, AuditEvent, CompareRequest, FeedbackRequest, IntegrationReadiness, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
+from models import Agent, AgentList, AuditEvent, AuthorizeRequest, CompareRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
 from scan8004 import Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
 from icon_proxy import get_agent_icon
@@ -20,7 +21,9 @@ client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 app = FastAPI(title="AgentDock API", version="1.0.0")
 api = APIRouter(prefix="/api")
-b402 = B402Adapter()
+# Merchant-side adapter (accepting payments). Named apart from the `b402`
+# module, which is the buyer-side client used to pay other agents.
+b402_merchant = B402Adapter()
 artifacts = ArtifactStore()
 
 # The settlement network AgentDock itself targets. 8004scan discovery covers both
@@ -52,13 +55,58 @@ async def startup() -> None:
         await db.agents.insert_many(seed_agents())
     app.state.scan_sync_task = __import__("asyncio").create_task(sync_bsc_mainnet(db))
     app.state.scan_testnet_task = __import__("asyncio").create_task(sync_bsc_testnet(db))
+    app.state.b402_sync_task = __import__("asyncio").create_task(sync_b402_catalog())
     app.state.scan_mainnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 56, False))
     app.state.scan_testnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 97, True))
+
+
+async def sync_b402_catalog() -> dict:
+    """Discover payable BNB Chain services from Binance's public b402 Bazaar.
+
+    Discovery only. What a task actually pays is always read from the merchant's
+    live 402 challenge, because the catalog and the challenge have been observed
+    to disagree on network and asset.
+    """
+    key = {"source": "b402_bazaar"}
+    await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": now_iso()}}, upsert=True)
+    try:
+        # Hard ceiling on the whole fetch. A startup task that hangs leaves the
+        # status stuck on "running" forever, which reads as "still working"
+        # rather than "broken" — observed once against this endpoint.
+        items = await __import__("asyncio").wait_for(b402.fetch_bazaar(limit=100), timeout=60)
+        projected = [p for p in (b402.bazaar_projection(item) for item in items) if p]
+        for row in projected:
+            await db.b402_resources.update_one({"id": row["id"]}, {"$set": {**row, "synced_at": now_iso()}}, upsert=True)
+        result = {"status": "success", "source": "b402_bazaar", "imported": len(projected), "listed_total": len(items), "completed_at": now_iso(), "error": None}
+    except Exception as exc:
+        result = {"status": "degraded", "source": "b402_bazaar", "imported": 0, "error": str(exc) if isinstance(exc, b402.B402Error) else "Unexpected b402 catalog error", "failed_at": now_iso()}
+    await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
+    return result
 
 
 @api.get("/", tags=["system"])
 async def root():
     return {"message": "AgentDock API", "status": "ready"}
+
+
+@api.post("/b402/sync", tags=["b402"])
+async def trigger_b402_sync():
+    """Refresh the catalog on demand. The startup task is best-effort; this is the
+    reliable path, and it surfaces the upstream error instead of hiding it."""
+    return await sync_b402_catalog()
+
+
+@api.get("/b402/resources", tags=["b402"])
+async def list_b402_resources(search: str = ""):
+    query: dict = {}
+    if search:
+        query["$or"] = [
+            {"description": {"$regex": re.escape(search), "$options": "i"}},
+            {"host": {"$regex": re.escape(search), "$options": "i"}},
+        ]
+    items = await db.b402_resources.find(query, {"_id": 0}).sort("host", 1).to_list(200)
+    status = await db.sync_runs.find_one({"source": "b402_bazaar"}, {"_id": 0})
+    return {"items": items, "total": len(items), "network": "eip155:56", "chain_id": 56, "source": "b402_bazaar", "sync": status or {"status": "never_run"}}
 
 
 @api.get("/health", tags=["system"])
@@ -75,13 +123,13 @@ async def readiness():
         rpc_ok, code_ok = False, False
     endpoints_ready = all(os.environ.get(f"AGENT_{idx}_URL") for idx in range(1, 4))
     notes = []
-    if not b402.ready:
+    if not b402_merchant.ready:
         notes.append("Binance B402 partner onboarding is required before payment can be enabled.")
     if not endpoints_ready:
         notes.append("Seed profiles are visible, but live agent endpoints are not configured.")
     if not artifacts.ready:
         notes.append("Result artifacts will use MongoDB fallback until object storage is configured.")
-    return IntegrationReadiness(chain_id=CHAIN_ID, registry_configured=bool(os.environ.get("ERC8004_IDENTITY_REGISTRY")), rpc_reachable=rpc_ok, registry_has_code=code_ok, b402_ready=b402.ready, agent_endpoints_ready=endpoints_ready, object_storage_ready=artifacts.ready, storage_mode="object_storage" if artifacts.ready else "mongodb_fallback", notes=notes)
+    return IntegrationReadiness(chain_id=CHAIN_ID, registry_configured=bool(os.environ.get("ERC8004_IDENTITY_REGISTRY")), rpc_reachable=rpc_ok, registry_has_code=code_ok, b402_ready=b402_merchant.ready, agent_endpoints_ready=endpoints_ready, object_storage_ready=artifacts.ready, storage_mode="object_storage" if artifacts.ready else "mongodb_fallback", notes=notes)
 
 
 @api.get("/integrations/8004scan/status", tags=["system"])
@@ -272,13 +320,21 @@ async def create_task(payload: TaskCreate):
     blocked = next((term for term in BLOCKED_TERMS if term in text), None)
     if blocked:
         raise HTTPException(422, f"Unsafe request rejected: '{blocked}' is outside the research-only schema")
-    agent = await db.agents.find_one({"id": payload.agent_id}, {"_id": 0})
-    if not agent:
-        raise HTTPException(404, "Agent not found")
-    if agent["status"] != "active":
-        raise HTTPException(409, "Agent is currently offline")
     stamp, task_id = now_iso(), str(uuid.uuid4())
-    task = {"id": task_id, "agent_id": agent["id"], "agent_name": agent["name"], "objective": payload.objective, "constraints": payload.constraints, "wallet_address": payload.wallet_address, "state": "created", "estimated_price_usd": agent["price_usd"], "quote_id": None, "quote_expires_at": None, "tx_hash": None, "result": None, "created_at": stamp, "updated_at": stamp}
+    if payload.agent_id.startswith("b402-"):
+        resource = await db.b402_resources.find_one({"id": payload.agent_id}, {"_id": 0})
+        if not resource:
+            raise HTTPException(404, "Agent not found")
+        # No price yet: the merchant quotes it in its 402 response at run time.
+        agent_id, agent_name, price = resource["id"], resource["host"], None
+    else:
+        agent = await db.agents.find_one({"id": payload.agent_id}, {"_id": 0})
+        if not agent:
+            raise HTTPException(404, "Agent not found")
+        if agent["status"] != "active":
+            raise HTTPException(409, "Agent is currently offline")
+        agent_id, agent_name, price = agent["id"], agent["name"], agent["price_usd"]
+    task = {"id": task_id, "agent_id": agent_id, "agent_name": agent_name, "objective": payload.objective, "constraints": payload.constraints, "wallet_address": payload.wallet_address, "state": "created", "estimated_price_usd": price, "payment_terms": None, "settlement": None, "result_preview": None, "quote_id": None, "quote_expires_at": None, "tx_hash": None, "result": None, "created_at": stamp, "updated_at": stamp}
     await db.tasks.insert_one(task.copy())
     await audit(task_id, "task.created", "Research task accepted; no payment or agent execution has occurred.")
     return task
@@ -293,6 +349,117 @@ async def get_task(task_id: str):
     return TaskDetail(task=task, audit_events=events)
 
 
+async def _b402_task(task_id: str) -> tuple[dict, dict]:
+    task = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if not task:
+        raise HTTPException(404, "Task not found")
+    resource = await db.b402_resources.find_one({"id": task["agent_id"]}, {"_id": 0})
+    if not resource:
+        raise HTTPException(409, "This task is not attached to a b402 resource")
+    return task, resource
+
+
+def _call_params(task: dict, resource: dict) -> dict:
+    return {resource.get("query_param") or "query": task["objective"]}
+
+
+@api.post("/tasks/{task_id}/run", tags=["tasks"])
+async def run_task(task_id: str):
+    """Call the merchant unpaid. A 200 completes the task; a 402 quotes the terms."""
+    task, resource = await _b402_task(task_id)
+    if task["state"] not in ("created", "payment_pending"):
+        raise HTTPException(409, f"Task is already {task['state']}")
+    try:
+        challenge, response = await b402.fetch_challenge(resource["resource"], params=_call_params(task, resource))
+    except b402.B402Error as exc:
+        await audit(task_id, "run.failed", f"Agent endpoint could not be reached safely: {exc}")
+        raise HTTPException(502, str(exc)) from exc
+
+    if response.status_code < 400 and not challenge:
+        body = response.text[:4000]
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "completed", "result": {"body": body}, "result_preview": body[:600], "estimated_price_usd": 0.0, "updated_at": now_iso()}})
+        await audit(task_id, "run.completed", "Agent answered without requesting payment; no signature was requested.")
+        return {"state": "completed", "paid": False, "result_preview": body[:600]}
+
+    if not challenge:
+        await audit(task_id, "run.failed", f"Agent returned HTTP {response.status_code} without payment terms.")
+        raise HTTPException(502, f"Agent returned HTTP {response.status_code} without payment terms")
+
+    try:
+        accept = b402.select_bsc_eip3009(challenge)
+        terms = b402.describe_terms(accept)
+    except b402.PaymentRefused as exc:
+        await audit(task_id, "payment.refused", str(exc))
+        raise HTTPException(409, str(exc)) from exc
+    except b402.B402Error as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "payment_terms": terms, "b402_accept": accept, "estimated_price_usd": terms["amount_tokens"], "updated_at": now_iso()}})
+    await audit(task_id, "payment.quoted", f"Agent requires {terms['amount_tokens']:g} {terms['asset_name']} on BNB Chain. Nothing is signed until you approve it in your wallet.")
+    return {"state": "payment_pending", "paid": True, "terms": terms}
+
+
+@api.post("/tasks/{task_id}/authorize", tags=["tasks"])
+async def authorize_task(task_id: str, payload: AuthorizeRequest):
+    """Return EIP-712 typed data for the user's wallet. No key is held here."""
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", payload.payer):
+        raise HTTPException(422, "A valid EVM payer address is required")
+    task, _ = await _b402_task(task_id)
+    if task["state"] != "payment_pending":
+        raise HTTPException(409, f"Task is {task['state']}, not awaiting payment")
+    accept = task.get("b402_accept")
+    if not accept:
+        raise HTTPException(409, "Run the task first to obtain the merchant's terms")
+
+    # Minted fresh on every attempt: the merchant's window is short, and a reused
+    # nonce would let the same authorization be replayed.
+    now = int(datetime.now(timezone.utc).timestamp())
+    valid_before = now + int(accept.get("maxTimeoutSeconds") or 60)
+    nonce = "0x" + uuid.uuid4().hex + uuid.uuid4().hex
+    typed_data = b402.build_typed_data(accept, payload.payer, now - 5, valid_before, nonce)
+    await db.tasks.update_one({"id": task_id}, {"$set": {"b402_authorization": typed_data["message"], "wallet_address": payload.payer, "updated_at": now_iso()}})
+    await audit(task_id, "payment.authorization_prepared", "Payment authorization prepared for wallet signature.")
+    return {"typed_data": typed_data, "terms": task.get("payment_terms"), "expires_at": datetime.fromtimestamp(valid_before, timezone.utc).isoformat()}
+
+
+@api.post("/tasks/{task_id}/pay", tags=["tasks"])
+async def pay_task(task_id: str, payload: PayRequest):
+    """Replay the call with the user's signature attached."""
+    if not re.fullmatch(r"0x[a-fA-F0-9]{130}", payload.signature):
+        raise HTTPException(422, "A valid 65-byte signature is required")
+    task, resource = await _b402_task(task_id)
+    accept, authorization = task.get("b402_accept"), task.get("b402_authorization")
+    if not accept or not authorization:
+        raise HTTPException(409, "Prepare the payment authorization first")
+
+    # Idempotency: only a task still awaiting payment may move to paid, so a
+    # double submit cannot pay twice.
+    moved = await db.tasks.update_one({"id": task_id, "state": "payment_pending"}, {"$set": {"state": "paid", "updated_at": now_iso()}})
+    if moved.modified_count != 1:
+        raise HTTPException(409, f"Task is {task['state']}, not awaiting payment")
+    await audit(task_id, "payment.submitted", "Signed payment authorization submitted to the agent.")
+
+    header = b402.build_payment_header(accept, payload.signature, authorization)
+    try:
+        response = await b402.call_paid(resource["resource"], header, params=_call_params(task, resource))
+    except b402.B402Error as exc:
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "updated_at": now_iso()}})
+        await audit(task_id, "run.failed", f"Paid call failed: {exc}")
+        raise HTTPException(502, str(exc)) from exc
+
+    settlement = b402.decode_settlement(response)
+    if response.status_code >= 400:
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "settlement": settlement, "updated_at": now_iso()}})
+        await audit(task_id, "payment.rejected", f"Agent rejected the payment with HTTP {response.status_code}.")
+        raise HTTPException(402, {"message": "Agent rejected the payment", "status": response.status_code, "settlement": settlement, "body": response.text[:600]})
+
+    body = response.text[:4000]
+    tx_hash = (settlement or {}).get("transaction")
+    await db.tasks.update_one({"id": task_id}, {"$set": {"state": "completed", "result": {"body": body}, "result_preview": body[:600], "settlement": settlement, "tx_hash": tx_hash, "updated_at": now_iso()}})
+    await audit(task_id, "run.completed", "Agent executed and returned a result after settlement.")
+    return {"state": "completed", "result_preview": body[:600], "settlement": settlement, "tx_hash": tx_hash}
+
+
 @api.post("/tasks/{task_id}/quote", tags=["tasks"])
 async def create_quote(task_id: str, payload: QuoteRequest):
     task = await db.tasks.find_one({"id": task_id}, {"_id": 0})
@@ -300,13 +467,13 @@ async def create_quote(task_id: str, payload: QuoteRequest):
         raise HTTPException(404, "Task not found")
     if not re.fullmatch(r"0x[a-fA-F0-9]{40}", payload.payer):
         raise HTTPException(422, "A valid EVM payer address is required")
-    if not b402.ready:
+    if not b402_merchant.ready:
         await audit(task_id, "quote.blocked", "Binance B402 partner configuration is not active; no payment was requested.")
         raise HTTPException(503, "Binance B402 is not configured. Payment remains disabled and no wallet signature is requested.")
     quote_id = str(uuid.uuid4())
     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
     try:
-        requirements = await b402.supported()
+        requirements = await b402_merchant.supported()
     except B402Unavailable as exc:
         raise HTTPException(503, str(exc)) from exc
     await db.tasks.update_one({"id": task_id, "state": "created"}, {"$set": {"quote_id": quote_id, "quote_expires_at": expires_at, "wallet_address": payload.payer, "updated_at": now_iso()}})

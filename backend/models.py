@@ -58,6 +58,14 @@ class TaskCreate(BaseModel):
     wallet_address: str | None = None
 
 
+class AuthorizeRequest(BaseModel):
+    payer: str
+
+
+class PayRequest(BaseModel):
+    signature: str
+
+
 class TaskRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
@@ -67,7 +75,12 @@ class TaskRecord(BaseModel):
     constraints: str
     wallet_address: str | None
     state: TaskState
-    estimated_price_usd: float
+    # Unknown until the merchant answers with its 402 terms, so b402 tasks start
+    # without one rather than displaying an invented figure.
+    estimated_price_usd: float | None = None
+    payment_terms: dict[str, Any] | None = None
+    settlement: dict[str, Any] | None = None
+    result_preview: str | None = None
     quote_id: str | None = None
     quote_expires_at: str | None = None
     tx_hash: str | None = None

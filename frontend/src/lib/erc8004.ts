@@ -10,6 +10,12 @@ export const ERC8004_NETWORKS = {
   testnet: { label:"BSC Testnet", chainId:97, registry:testnetRegistry, explorer:"https://testnet.bscscan.com" },
 } as const;
 
+// The network AgentDock targets by default. Testnet stays selectable in the
+// explorer, My Agents and registration so identities can be rehearsed without
+// spending real BNB; everything else follows this constant.
+export const DEFAULT_NETWORK = "mainnet" as const;
+export const DEFAULT_CHAIN = ERC8004_NETWORKS[DEFAULT_NETWORK];
+
 export type AgentMetadataInput = { name:string; description:string; image:string; serviceName:string; serviceEndpoint:string; serviceVersion:string; x402Support:boolean; active:boolean; supportedTrust:string };
 
 export const identityAbi = [

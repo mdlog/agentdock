@@ -1,7 +1,7 @@
 import { LogOut, Wallet } from "lucide-react";
 import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
-import { bscTestnet } from "wagmi/chains";
 import { toast } from "sonner";
+import { DEFAULT_CHAIN } from "@/lib/erc8004";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
@@ -18,7 +18,7 @@ export const WalletButton = () => {
     <DropdownMenu>
       <DropdownMenuTrigger asChild><Button data-testid="connected-wallet-menu" variant="outline" className="wallet-button"><span className="wallet-dot" />{short}</Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        {![56,97].includes(chainId||0) && <DropdownMenuItem data-testid="switch-bsc-testnet" onClick={() => switchChain({ chainId: bscTestnet.id })}>Switch to BSC Testnet</DropdownMenuItem>}
+        {chainId !== DEFAULT_CHAIN.chainId && <DropdownMenuItem data-testid="switch-default-chain" onClick={() => switchChain({ chainId: DEFAULT_CHAIN.chainId })}>Switch to {DEFAULT_CHAIN.label}</DropdownMenuItem>}
         <DropdownMenuItem data-testid="disconnect-wallet" onClick={() => disconnect()}><LogOut size={15} /> Disconnect</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

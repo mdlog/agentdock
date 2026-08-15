@@ -1,6 +1,7 @@
 import { Bot, Database, GitCompareArrows, Search, UserRound } from "lucide-react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { WalletButton } from "./WalletButton";
+import { DEFAULT_CHAIN } from "@/lib/erc8004";
 
 export default function AppShell() {
   return <div className="app-shell">
@@ -15,6 +16,6 @@ export default function AppShell() {
       <WalletButton />
     </header>
     <main><Outlet /></main>
-    <footer className="footer" data-testid="app-footer"><span>AgentDock · Research agents on BSC Testnet</span><span>Agents recommend. You approve every financial action.</span></footer>
+    <footer className="footer" data-testid="app-footer"><span>AgentDock · Research agents on {DEFAULT_CHAIN.label}</span><span>Agents recommend. You approve every financial action.</span></footer>
   </div>;
 }

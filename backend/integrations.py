@@ -68,12 +68,14 @@ async def registry_health() -> tuple[bool, bool]:
     registry = os.environ.get("ERC8004_IDENTITY_REGISTRY")
     if rpc_url and registry:
         try:
+            expected = int(os.environ.get("BSC_CHAIN_ID", "56"))
             async with httpx.AsyncClient(timeout=RPC_TIMEOUT) as client:
                 chain = await client.post(rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []})
-                if chain.json().get("result") == "0x61":
+                # Compared numerically: the RPC may return any hex casing or padding.
+                if int(chain.json().get("result") or "0x0", 16) == expected:
                     code = await client.post(rpc_url, json={"jsonrpc": "2.0", "id": 2, "method": "eth_getCode", "params": [registry, "latest"]})
                     result = (True, code.json().get("result", "0x") != "0x")
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, TypeError):
             result = (False, False)
 
     ttl = HEALTH_TTL_OK if result[0] else HEALTH_TTL_FAIL

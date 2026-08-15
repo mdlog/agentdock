@@ -6,7 +6,7 @@
 
 AgentDock is a desktop-first BNB Agent Marketplace for discovering, comparing, paying, and running ERC-8004 agents through a safe, auditable flow. The first audience is DeFi users who need research before making a decision. The primary demo compares three research/yield agents, pays one through Binance x402/B402, runs a task, and returns a result with execution proof.
 
-The product has a hard research-only boundary: agents cannot hold user funds, request approvals, sign for users, or execute swaps. Users remain responsible for signing financial actions. PancakeSwap is the first read-only data use case. BSC Testnet remains the target network until security and refund handling are proven.
+The product has a hard research-only boundary: agents cannot hold user funds, request approvals, sign for users, or execute swaps. Users remain responsible for signing financial actions. PancakeSwap is the first read-only data use case. BSC Mainnet is the target network as of 2026-08-15; testnet remains selectable for rehearsing registration.
 
 Core requirements:
 
@@ -45,7 +45,7 @@ Monitors onchain identity, endpoint health, task state, payment reconciliation, 
 - **Frontend:** React 19 + TypeScript, React Router, wagmi v2, viem, MetaMask injected connector, official Binance Web3 Wallet connector, shadcn/ui primitives.
 - **Backend:** FastAPI with typed Pydantic response models and strict `/api` routes.
 - **Database:** MongoDB collections for agents, tasks, audit events, payments, and feedback; UUID public identifiers; Mongo `_id` excluded from API responses.
-- **Blockchain:** BSC Testnet chain ID 97. Public BSC testnet RPC and public ERC-8004 Identity Registry are environment-configured defaults; readiness checks verify chain and contract bytecode.
+- **Blockchain:** BSC Mainnet chain ID 56, configured through `BSC_CHAIN_ID`; no chain id is hardcoded in application code. RPC and ERC-8004 Identity Registry are environment-configured; readiness checks verify chain and contract bytecode.
 - **Payments:** Strict Binance B402 V2 adapter boundary. Payment stays disabled unless partner base URL, client ID, access token, and RSA key are configured. Browser payment claims are never accepted as proof.
 - **Storage:** S3-compatible private object-storage adapter with MongoDB JSON fallback while credentials are absent.
 - **Safety:** Research schema rejects private keys, seed phrases, approvals, swaps, and delegated signing requests. Offline agents cannot be hired.
@@ -109,6 +109,15 @@ Monitors onchain identity, endpoint health, task state, payment reconciliation, 
 - Metadata is encoded as a self-contained registration `data:` URI, avoiding unavailable object storage; Mainnet requires an additional explicit risk confirmation.
 - Added verified 8004scan create/manage deep links and preserved read-only access for disconnected or non-owner visitors.
 - Made Binance Wallet connector lazy: it initializes only when the extension is present, preventing background websocket errors for other visitors.
+
+### 2026-08-15 — BSC Mainnet target and real-identity catalog
+
+- Switched the settlement target to BSC Mainnet chain 56. `BSC_CHAIN_ID` now drives readiness, quotes and seed identity; `registry_health` compares the chain id numerically instead of matching a hardcoded hex literal.
+- Verified the mainnet ERC-8004 registry `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` carries bytecode on chain 56 through a dedicated RPC endpoint.
+- Frontend network labels, explorer links, wallet switching and registration defaults follow a single `DEFAULT_CHAIN` constant. Testnet stays selectable in the explorer, My Agents and registration so identities can be rehearsed without spending real BNB.
+- Replaced the marketplace catalog with the synchronized BSC Mainnet ERC-8004 identities and removed the seed demo catalog from the interface. No agent publishes a price or callable endpoint onchain, so hiring is shown as unavailable rather than backed by generated figures.
+- Cached readiness and moved it off the critical path, after a slow public RPC made an 8s readiness check discard content that had already loaded.
+- Removed the scaffolding platform's branding, telemetry and container assumptions, and stopped tracking `.env`.
 
 ## Current integration status
 

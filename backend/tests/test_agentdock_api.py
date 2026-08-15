@@ -37,7 +37,7 @@ def test_readiness_flags_expected_when_integrations_unconfigured(api_client: req
     response = api_client.get(f"{api_base_url}/api/integrations/readiness", timeout=20)
     assert response.status_code == 200
     data = response.json()
-    assert data["chain_id"] == 97
+    assert data["chain_id"] == 56
     assert data["rpc_reachable"] is True
     assert data["registry_has_code"] is True
     assert data["b402_ready"] is False

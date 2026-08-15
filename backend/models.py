@@ -17,7 +17,7 @@ class MetricSet(BaseModel):
 
 
 class OnchainIdentity(BaseModel):
-    chain_id: int = 97
+    chain_id: int = 56
     registry: str
     agent_id: int
     metadata_verified: bool

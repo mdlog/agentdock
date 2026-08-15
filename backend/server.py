@@ -23,6 +23,10 @@ api = APIRouter(prefix="/api")
 b402 = B402Adapter()
 artifacts = ArtifactStore()
 
+# The settlement network AgentDock itself targets. 8004scan discovery covers both
+# BSC networks independently and is not affected by this value.
+CHAIN_ID = int(os.environ.get("BSC_CHAIN_ID", "56"))
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -77,7 +81,7 @@ async def readiness():
         notes.append("Seed profiles are visible, but live agent endpoints are not configured.")
     if not artifacts.ready:
         notes.append("Result artifacts will use MongoDB fallback until object storage is configured.")
-    return IntegrationReadiness(chain_id=97, registry_configured=bool(os.environ.get("ERC8004_IDENTITY_REGISTRY")), rpc_reachable=rpc_ok, registry_has_code=code_ok, b402_ready=b402.ready, agent_endpoints_ready=endpoints_ready, object_storage_ready=artifacts.ready, storage_mode="object_storage" if artifacts.ready else "mongodb_fallback", notes=notes)
+    return IntegrationReadiness(chain_id=CHAIN_ID, registry_configured=bool(os.environ.get("ERC8004_IDENTITY_REGISTRY")), rpc_reachable=rpc_ok, registry_has_code=code_ok, b402_ready=b402.ready, agent_endpoints_ready=endpoints_ready, object_storage_ready=artifacts.ready, storage_mode="object_storage" if artifacts.ready else "mongodb_fallback", notes=notes)
 
 
 @api.get("/integrations/8004scan/status", tags=["system"])
@@ -306,7 +310,7 @@ async def create_quote(task_id: str, payload: QuoteRequest):
     except B402Unavailable as exc:
         raise HTTPException(503, str(exc)) from exc
     await db.tasks.update_one({"id": task_id, "state": "created"}, {"$set": {"quote_id": quote_id, "quote_expires_at": expires_at, "wallet_address": payload.payer, "updated_at": now_iso()}})
-    return {"quote_id": quote_id, "chain_id": 97, "expires_at": expires_at, "amount_usd": task["estimated_price_usd"], "payment_requirements": requirements}
+    return {"quote_id": quote_id, "chain_id": CHAIN_ID, "expires_at": expires_at, "amount_usd": task["estimated_price_usd"], "payment_requirements": requirements}
 
 
 @api.post("/tasks/{task_id}/feedback", tags=["tasks"])

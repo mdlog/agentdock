@@ -31,6 +31,7 @@ AGENT_BLUEPRINTS = [
 
 def seed_agents() -> list[dict]:
     registry = os.environ.get("ERC8004_IDENTITY_REGISTRY", "")
+    chain_id = int(os.environ.get("BSC_CHAIN_ID", "56"))
     stamp = datetime.now(timezone.utc).isoformat()
     agents = []
     for idx, (agent_id, name, tagline, category, capabilities, price) in enumerate(AGENT_BLUEPRINTS, start=1):
@@ -51,7 +52,7 @@ def seed_agents() -> list[dict]:
             "price_usd": price,
             "status": "offline" if idx in (12, 19) else "active",
             "metrics": {"success_rate": success, "uptime_pct": uptime, "latency_sec": latency, "task_volume": volume, "recency_score": recency, "feedback_score": feedback, "reputation_score": reputation},
-            "identity": {"chain_id": 97, "registry": registry, "agent_id": idx, "metadata_verified": idx % 4 != 0, "endpoint_verified": False, "source": "ERC-8004 seed pending sync"},
+            "identity": {"chain_id": chain_id, "registry": registry, "agent_id": idx, "metadata_verified": idx % 4 != 0, "endpoint_verified": False, "source": "ERC-8004 seed pending sync"},
             "output_schema": ["Summary", "Evidence", "Risk flags", "Recommendation"],
             "updated_at": stamp,
         })

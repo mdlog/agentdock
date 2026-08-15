@@ -23,15 +23,21 @@ def utc_now() -> str:
 class Scan8004Client:
     def __init__(self):
         self.base_url = os.environ["SCAN8004_BASE_URL"].rstrip("/")
+        # Detail lookups go to the non-/public route. Both are unauthenticated —
+        # the key is ignored on either — but /public allows 10 requests a minute
+        # while this one allows 180, which is the difference between resolving
+        # every synced agent's endpoint in under a minute and taking ten. It
+        # returns the agent object unwrapped, where /public wraps it in `data`.
+        self.detail_base_url = os.environ.get("SCAN8004_DETAIL_BASE_URL") or self.base_url.removesuffix("/public").rstrip("/")
         self.api_key = os.environ["SCAN8004_API_KEY"]
         self.timeout = httpx.Timeout(45, connect=8)
 
-    async def _get(self, path: str, params: dict[str, Any]) -> httpx.Response:
+    async def _get(self, path: str, params: dict[str, Any], base: str | None = None) -> httpx.Response:
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as http:
                     response = await http.get(
-                        f"{self.base_url}{path}",
+                        f"{base or self.base_url}{path}",
                         params=params,
                         headers={"X-API-Key": self.api_key, "Accept": "application/json"},
                     )
@@ -105,11 +111,23 @@ class Scan8004Client:
             raise Scan8004Error("Malformed 8004scan ownership response") from exc
 
     async def agent_detail(self, chain_id: int, token_id: int) -> dict:
-        response = await self._get(f"/agents/{chain_id}/{token_id}", {})
+        path = f"/agents/{chain_id}/{token_id}"
         try:
-            return response.json()["data"]
-        except (ValueError, KeyError, TypeError) as exc:
-            raise Scan8004Error("Malformed 8004scan detail response") from exc
+            response = await self._get(path, {}, base=self.detail_base_url)
+            payload = response.json()
+        except (Scan8004Error, ValueError):
+            # The high-rate route is undocumented, so a failure there falls back
+            # to /public rather than breaking agent detail outright.
+            response = await self._get(path, {})
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise Scan8004Error("Malformed 8004scan detail response") from exc
+        # /public wraps the agent in `data`; the high-rate route returns it bare.
+        agent = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        if not isinstance(agent, dict) or "token_id" not in agent:
+            raise Scan8004Error("Malformed 8004scan detail response")
+        return agent
 
     async def agent_feedbacks(self, chain_id: int, token_id: int, limit: int = 20) -> list[dict]:
         response = await self._get("/feedbacks", {"page": 1, "limit": limit, "chainId": chain_id, "tokenId": token_id})

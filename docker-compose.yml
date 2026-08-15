@@ -1,0 +1,69 @@
+# AgentDock — one-command local/single-host stack: MongoDB + backend + frontend.
+#
+# For a real public deployment, prefer hosting each piece separately (MongoDB
+# Atlas, backend on Render/Fly/Railway, frontend on Vercel/Netlify) — see
+# DEPLOY.md. This compose file is the fastest way to run the whole thing on one
+# machine and to verify the container builds.
+#
+# Set PUBLIC_URL to the address the browser will use to reach the frontend, and
+# BACKEND_PUBLIC_URL to the address the browser will use to reach the backend.
+# On a laptop both are http://localhost:<port>; on a server they are its public
+# host. The frontend bakes BACKEND_PUBLIC_URL at build time (CRA limitation).
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - agentdock-mongo-data:/data/db
+    # Not published to the host by default — only the backend needs it.
+    expose:
+      - "27017"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: agentdock
+      CORS_ORIGINS: ${PUBLIC_URL:-http://localhost:3100}
+      BSC_CHAIN_ID: "56"
+      BSC_RPC_URL: ${BSC_RPC_URL:?set BSC_RPC_URL (an Alchemy/QuickNode BNB mainnet endpoint)}
+      ERC8004_IDENTITY_REGISTRY: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+      SCAN8004_BASE_URL: https://8004scan.io/api/v1/public
+      SCAN8004_API_KEY: ${SCAN8004_API_KEY:?set SCAN8004_API_KEY}
+      SCAN8004_CHAIN_ID: "56"
+      # Payments/agent-exec/object-storage stay disabled unless these are set.
+      B402_BASE_URL: ""
+      B402_CLIENT_ID: ""
+      B402_ACCESS_TOKEN: ""
+      B402_RSA_PRIVATE_KEY_PATH: ""
+      S3_ENDPOINT_URL: ""
+      S3_REGION: ""
+      S3_BUCKET: ""
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_BACKEND_URL: ${BACKEND_PUBLIC_URL:-http://localhost:8000}
+        REACT_APP_BSC_RPC_URL: https://data-seed-prebsc-1-s1.bnbchain.org:8545
+        REACT_APP_BSC_MAINNET_RPC_URL: https://bsc-dataseed.bnbchain.org
+        REACT_APP_BINANCE_WALLET_URL: https://www.binance.com/en/web3wallet
+        REACT_APP_ERC8004_MAINNET_REGISTRY: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+        REACT_APP_ERC8004_TESTNET_REGISTRY: "0x8004A818BFB912233c491871b3d84c89A494BD9e"
+        REACT_APP_8004SCAN_URL: https://8004scan.io
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3100:80"
+
+volumes:
+  agentdock-mongo-data:

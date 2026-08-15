@@ -199,19 +199,40 @@ async def call_paid(url: str, header: str, method: str = "GET", params: dict | N
     return response
 
 
-async def fetch_bazaar(page: int = 1, limit: int = 100) -> list[dict[str, Any]]:
-    """Discovery only. Terms are never taken from here — see fetch_challenge."""
+async def fetch_bazaar(limit: int = 100, max_pages: int = 20) -> list[dict[str, Any]]:
+    """Discovery only. Terms are never taken from here — see fetch_challenge.
+
+    Pages by `offset`. The API also accepts a `page` parameter but ignores it —
+    page=2 returns the same rows as page=1 — so anything past the first `limit`
+    would be silently lost if this paged the obvious way.
+    """
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    offset = 0
     async with httpx.AsyncClient(timeout=CATALOG_TIMEOUT) as client:
-        response = await client.get(
-            f"{BAZAAR_BASE}/bazaar/resources",
-            params={"page": page, "limit": limit},
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-        )
-    try:
-        response.raise_for_status()
-        return (response.json().get("data") or {}).get("items") or []
-    except (httpx.HTTPError, ValueError, AttributeError) as exc:
-        raise B402Error("b402 Bazaar catalog is unavailable") from exc
+        for _ in range(max_pages):
+            try:
+                response = await client.get(
+                    f"{BAZAAR_BASE}/bazaar/resources",
+                    params={"offset": offset, "limit": limit},
+                    headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                )
+                response.raise_for_status()
+                data = response.json().get("data") or {}
+            except (httpx.HTTPError, ValueError, AttributeError) as exc:
+                raise B402Error("b402 Bazaar catalog is unavailable") from exc
+            items = data.get("items") or []
+            fresh = [item for item in items if item.get("resource") not in seen]
+            for item in fresh:
+                seen.add(item.get("resource"))
+            collected.extend(fresh)
+            total = (data.get("pagination") or {}).get("total")
+            # Stop on a page that added nothing new, so an API that ignores the
+            # offset cannot spin this loop.
+            if not fresh or (isinstance(total, int) and len(collected) >= total):
+                break
+            offset += limit
+    return collected
 
 
 def bazaar_projection(item: dict[str, Any]) -> dict[str, Any] | None:

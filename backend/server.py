@@ -77,7 +77,14 @@ async def sync_b402_catalog() -> dict:
         projected = [p for p in (b402.bazaar_projection(item) for item in items) if p]
         for row in projected:
             await db.b402_resources.update_one({"id": row["id"]}, {"$set": {**row, "synced_at": now_iso()}}, upsert=True)
-        result = {"status": "success", "source": "b402_bazaar", "imported": len(projected), "listed_total": len(items), "completed_at": now_iso(), "error": None}
+        # Recorded rather than silently dropped: a listing is skipped when it is
+        # served over plain HTTP or accepts payment only off BNB Chain, and the
+        # difference between listed and imported should be explainable.
+        skipped = [
+            {"resource": item.get("resource"), "reason": "not https" if not str(item.get("resource", "")).startswith("https://") else "no BNB Chain option"}
+            for item in items if b402.bazaar_projection(item) is None
+        ]
+        result = {"status": "success", "source": "b402_bazaar", "imported": len(projected), "listed_total": len(items), "skipped": skipped, "completed_at": now_iso(), "error": None}
     except Exception as exc:
         result = {"status": "degraded", "source": "b402_bazaar", "imported": 0, "error": str(exc) if isinstance(exc, b402.B402Error) else "Unexpected b402 catalog error", "failed_at": now_iso()}
     await db.sync_runs.update_one(key, {"$set": result}, upsert=True)

@@ -426,3 +426,86 @@ async def test_reachable_is_not_callable(monkeypatch, public_host):
 
     assert status == "error"
     assert "tokenId" in note
+
+
+# --- a registered URL may be a template, and a card may say "not deployed" ----
+
+def test_placeholder_is_substituted_with_the_agents_own_id():
+    url = "https://platform.example/api/v1/a2a/agents/{agentId}/card"
+
+    assert agent_client.substitute_agent_id(url, 255133) == "https://platform.example/api/v1/a2a/agents/255133/card"
+
+
+def test_url_without_a_placeholder_is_untouched():
+    url = "https://agent.example/rpc"
+
+    assert agent_client.substitute_agent_id(url, 255133) == url
+
+
+@pytest.mark.anyio
+async def test_card_identity_is_verified_before_the_substitution_is_trusted(monkeypatch, public_host):
+    """Substituting an id is only safe because the card says whose it is."""
+    _install(monkeypatch, [_response({"agentTokenId": "999", "name": "Someone Else", "url": "https://agent.example/rpc"})])
+
+    with pytest.raises(agent_client.AgentRejected) as caught:
+        await agent_client.call_a2a("https://platform.example/api/v1/a2a/agents/{agentId}/card", "hi", 255133)
+
+    assert "different agent" in str(caught.value)
+
+
+@pytest.mark.anyio
+async def test_platform_saying_unbound_is_not_reported_as_unreachable(monkeypatch, public_host):
+    """The real Termix shape: the card resolves, and states plainly that no
+    service is attached. That is a different fact from a dead host."""
+    _install(monkeypatch, [_response({
+        "agentTokenId": "255133", "name": "Grid-v3.agent", "endpoint": None,
+        "status": "UNBOUND", "presence": "offline", "skills": []})])
+
+    status, note = await agent_client.probe_endpoint(
+        "a2a", "https://platform.example/api/v1/a2a/agents/{agentId}/card", 255133)
+
+    assert status == "unbound"
+    assert "unbound" in note.lower()
+
+
+@pytest.mark.anyio
+async def test_card_endpoint_field_is_used_when_present(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"agentTokenId": "42", "name": "Bound", "endpoint": "https://agent.example/rpc", "status": "BOUND"}),
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "text", "text": "hello"}]}}),
+    ])
+
+    result = await agent_client.call_a2a("https://platform.example/api/v1/a2a/agents/{agentId}/card", "hi", 42)
+
+    assert "hello" in result["output"]
+
+
+@pytest.mark.anyio
+async def test_shared_endpoint_asking_for_an_id_is_retried_at_the_path_it_named(monkeypatch, public_host):
+    """The real BORT shape: one endpoint backs many registrations and answers
+    "a valid agent tokenId is required (path /api/a2a/:agentId)". Following the
+    convention it stated turns "faulty" into the operator's real answer."""
+    client = _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method: tasks/get"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "a valid agent tokenId is required (path /api/a2a/:agentId)"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32040, "message": "agent 153799 is not open to inbound A2A calls"}}),
+    ])
+
+    status, note = await agent_client.probe_endpoint("a2a", "https://api.example/api/a2a", 153799)
+
+    assert status == "unbound"
+    assert "not open to inbound" in note
+    assert client.sent[-1]["url"] == "https://api.example/api/a2a/153799"
+
+
+@pytest.mark.anyio
+async def test_agent_reachable_at_the_named_path_is_live(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "a valid agent tokenId is required"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"parts": [{"kind": "text", "text": "I am agent 7"}]}}),
+    ])
+
+    status, _note = await agent_client.probe_endpoint("a2a", "https://api.example/api/a2a", 7)
+
+    assert status == "live"

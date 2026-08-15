@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
+from urllib.parse import urlparse
 
 import agent_client
 import b402
@@ -488,7 +489,9 @@ async def create_task(payload: TaskCreate):
                 raise HTTPException(409, "This agent publishes no callable endpoint, so it cannot be activated.")
             kind, endpoint = detail
         agent_id, agent_name, price = agent["id"], agent["name"], None
-        extra = {"agent_endpoint": endpoint, "endpoint_kind": kind}
+        # Carried so a URL registered as a template can be resolved to this
+        # agent at run time, exactly as the probe resolved it.
+        extra = {"agent_endpoint": endpoint, "endpoint_kind": kind, "agent_token_id": agent["token_id"]}
     else:
         agent = await db.agents.find_one({"id": payload.agent_id}, {"_id": 0})
         if not agent:

@@ -66,6 +66,28 @@ def _looks_like_auth(text: str) -> bool:
     return any(hint in low for hint in _AUTH_HINTS)
 
 
+# A platform saying an agent is registered but not serving is a different fact
+# from an unreachable host, and the user deserves the difference.
+_UNBOUND_HINTS = ("not open to inbound", "not accepting", "no endpoint bound", "unbound",
+                  "not deployed", "agent is offline", "no service attached")
+
+
+def _looks_unbound(text: str) -> bool:
+    low = text.lower()
+    return any(hint in low for hint in _UNBOUND_HINTS)
+
+
+# When a shared endpoint answers that it needs the agent's id in the path, it has
+# told us its convention. Following it is not a guess — the retry either reaches
+# that agent or is refused by name.
+_NEEDS_ID_HINTS = ("tokenid is required", "agentid", "agent id is required", "/:agentid")
+
+
+def _asks_for_agent_id(text: str) -> bool:
+    low = text.lower().replace("_", "")
+    return any(hint.replace("_", "") in low for hint in _NEEDS_ID_HINTS)
+
+
 async def _assert_public_https(url: str) -> None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -141,12 +163,26 @@ def _unwrap(envelope: dict[str, Any] | None, step: str, *, tolerate_bare: bool =
     return result if isinstance(result, dict) else {"value": result}
 
 
+# Placeholders a platform leaves in the URL it registers on-chain. Substituting
+# the agent's own token id is not a guess: the card that comes back carries the
+# id and name, and resolve_a2a_endpoint refuses it unless they match.
+_ID_PLACEHOLDERS = ("{agentId}", "{agent_id}", "{tokenId}", "{token_id}", "{id}", "%7BagentId%7D")
+
+
+def substitute_agent_id(url: str, token_id: int | None) -> str:
+    if token_id is None:
+        return url
+    for placeholder in _ID_PLACEHOLDERS:
+        url = url.replace(placeholder, str(token_id))
+    return url
+
+
 def _is_agent_card(url: str) -> bool:
-    low = url.lower()
-    return "/.well-known/" in low or low.endswith("agent-card.json") or low.endswith("agent.json")
+    low = url.split("?")[0].lower().rstrip("/")
+    return "/.well-known/" in low or low.endswith("agent-card.json") or low.endswith("agent.json") or low.endswith("/card")
 
 
-async def resolve_a2a_endpoint(client: httpx.AsyncClient, url: str) -> str:
+async def resolve_a2a_endpoint(client: httpx.AsyncClient, url: str, token_id: int | None = None) -> str:
     """Follow an A2A agent card to the JSON-RPC endpoint it advertises.
 
     Registrations overwhelmingly point at /.well-known/agent-card.json, which
@@ -154,6 +190,7 @@ async def resolve_a2a_endpoint(client: httpx.AsyncClient, url: str) -> str:
     JSON-RPC at it just returns 404. The card names the real endpoint in `url`.
     Returned unchanged when the URL is already an endpoint.
     """
+    url = substitute_agent_id(url, token_id)
     if not _is_agent_card(url):
         return url
     response = await client.get(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
@@ -161,12 +198,28 @@ async def resolve_a2a_endpoint(client: httpx.AsyncClient, url: str) -> str:
     card = _sse_or_json(response.text)
     if not isinstance(card, dict):
         raise AgentRejected("The agent card was not readable JSON.", reason="unreadable")
-    target = card.get("url")
+    # The card proves which agent answered, so a substituted id is verified
+    # rather than assumed.
+    if token_id is not None:
+        claimed = str(card.get("agentTokenId") or card.get("tokenId") or token_id)
+        if claimed != str(token_id):
+            raise AgentRejected(f"The agent card belongs to a different agent (#{claimed}).", reason="upstream_error")
+
+    target = card.get("url") or card.get("endpoint")
     if not target:
         for interface in (card.get("additionalInterfaces") or []):
             if isinstance(interface, dict) and str(interface.get("transport", "")).upper().startswith("JSONRPC"):
                 target = interface.get("url")
                 break
+    if not target:
+        # Some platforms say plainly that the registration has no service behind
+        # it. That is a different fact from "unreachable" and is worth keeping.
+        status = str(card.get("status") or "").upper()
+        presence = str(card.get("presence") or "").lower()
+        if status in ("UNBOUND", "INACTIVE", "DRAFT") or presence == "offline":
+            raise AgentRejected(
+                f"The hosting platform lists this agent as {status.lower() or presence} with no endpoint bound.",
+                reason="unbound")
     if not target or _is_agent_card(str(target)):
         raise AgentRejected("The agent card names no callable endpoint.", reason="empty")
     # The card is third-party content, so its URL gets the same SSRF check as
@@ -238,10 +291,10 @@ def _a2a_text(result: dict[str, Any]) -> str:
     return "\n".join(p for p in found if p).strip()
 
 
-async def call_a2a(url: str, objective: str) -> dict[str, Any]:
-    await _assert_public_https(url)
+async def call_a2a(url: str, objective: str, token_id: int | None = None) -> dict[str, Any]:
+    await _assert_public_https(substitute_agent_id(url, token_id))
     async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
-        target = await resolve_a2a_endpoint(client, url)
+        target = await resolve_a2a_endpoint(client, url, token_id)
         response = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
             "message": {"role": "user", "parts": [{"kind": "text", "text": objective}], "messageId": "agentdock-1"}}})
         result = _unwrap(_sse_or_json(response.text), "message/send", tolerate_bare=True)
@@ -258,15 +311,15 @@ async def call_a2a(url: str, objective: str) -> dict[str, Any]:
         return {"transport": "a2a", "output": text[:4000]}
 
 
-async def probe_endpoint(kind: str, url: str) -> tuple[str, str]:
+async def probe_endpoint(kind: str, url: str, token_id: int | None = None) -> tuple[str, str]:
     """Bounded wrapper around _probe: a probe that hangs is a dead endpoint."""
     try:
-        return await asyncio.wait_for(_probe(kind, url), timeout=PROBE_WALL_CLOCK)
+        return await asyncio.wait_for(_probe(kind, url, token_id), timeout=PROBE_WALL_CLOCK)
     except (asyncio.TimeoutError, TimeoutError):
         return "dead", f"Endpoint did not answer within {int(PROBE_WALL_CLOCK)}s"
 
 
-async def _probe(kind: str, url: str) -> tuple[str, str]:
+async def _probe(kind: str, url: str, token_id: int | None = None) -> tuple[str, str]:
     """Check whether an endpoint can actually be called, returning (status, note).
 
     status is one of live | auth | payment | dead | error. Only "live" earns the
@@ -281,15 +334,16 @@ async def _probe(kind: str, url: str) -> tuple[str, str]:
     budget on a liveness check.
     """
     try:
-        await _assert_public_https(url)
+        await _assert_public_https(substitute_agent_id(url, token_id))
         async with httpx.AsyncClient(timeout=PROBE_TIMEOUT, follow_redirects=False) as client:
             if kind == "mcp":
+                url = substitute_agent_id(url, token_id)
                 init = await _post(client, url, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                     "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "agentdock", "version": "1.0"}}})
                 _unwrap(_sse_or_json(init.text), "initialize")
                 return "live", "MCP initialize succeeded"
 
-            target = await resolve_a2a_endpoint(client, url)
+            target = await resolve_a2a_endpoint(client, url, token_id)
             response = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "tasks/get",
                 "params": {"id": "agentdock-liveness-probe"}})
             envelope = _sse_or_json(response.text)
@@ -311,21 +365,36 @@ async def _probe(kind: str, url: str) -> tuple[str, str]:
             # answered every lookup, while refusing each actual call with "which
             # agent?". The only way to tell those apart is to make the call the
             # run path would make, so the verdict matches what the user gets.
-            send = await _post(client, target, {"jsonrpc": "2.0", "id": 2, "method": "message/send", "params": {
-                "message": {"role": "user", "parts": [{"kind": "text", "text": PROBE_MESSAGE}], "messageId": "agentdock-probe"}}})
-            _unwrap(_sse_or_json(send.text), "message/send", tolerate_bare=True)
+            probe_body = {"jsonrpc": "2.0", "id": 2, "method": "message/send", "params": {
+                "message": {"role": "user", "parts": [{"kind": "text", "text": PROBE_MESSAGE}], "messageId": "agentdock-probe"}}}
+            send = await _post(client, target, probe_body)
+            envelope = _sse_or_json(send.text) or {}
+            reply_error = envelope.get("error") if isinstance(envelope.get("error"), dict) else None
+            reply_message = str((reply_error or {}).get("message") or "")
+
+            # The endpoint asked for the agent's id in the path. Take it at its word,
+            # once, rather than recording "faulty" for something addressable.
+            if reply_error and token_id is not None and _asks_for_agent_id(reply_message):
+                send = await _post(client, f"{target.rstrip('/')}/{token_id}", probe_body)
+                envelope = _sse_or_json(send.text) or {}
+                reply_error = envelope.get("error") if isinstance(envelope.get("error"), dict) else None
+                reply_message = str((reply_error or {}).get("message") or "")
+
+            if reply_error and _looks_unbound(reply_message):
+                return "unbound", reply_message
+            _unwrap(envelope, "message/send", tolerate_bare=True)
             return "live", "A2A answered a probe message"
     except AgentPaymentRequired:
         return "payment", "Endpoint answers 402 — charges through its own x402 flow"
     except AgentRejected as exc:
-        return ("auth" if exc.reason == "auth" else "error"), str(exc)
+        return {"auth": "auth", "unbound": "unbound"}.get(exc.reason, "error"), str(exc)
     except AgentCallError as exc:
         return "dead", str(exc)
     except (httpx.HTTPError, OSError, ValueError) as exc:
         return "dead", f"{type(exc).__name__}: {exc}"
 
 
-async def call_agent(kind: str, url: str, objective: str) -> dict[str, Any]:
+async def call_agent(kind: str, url: str, objective: str, token_id: int | None = None) -> dict[str, Any]:
     if kind == "mcp":
-        return await call_mcp(url, objective)
-    return await call_a2a(url, objective)
+        return await call_mcp(substitute_agent_id(url, token_id), objective)
+    return await call_a2a(url, objective, token_id)

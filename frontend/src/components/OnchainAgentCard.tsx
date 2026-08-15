@@ -16,6 +16,7 @@ export const UNAVAILABLE: Record<string, { label: string; note: string; hint: st
   none: { label: "Identity only", note: "No endpoint published", hint: "This agent registered an identity but no callable endpoint." },
   auth: { label: "Needs a credential", note: "Endpoint is private", hint: "The endpoint answered, but requires its own API key." },
   payment: { label: "Charges separately", note: "Bills through its own x402", hint: "This agent settles through its own x402 endpoint, which AgentDock does not settle yet." },
+  unbound: { label: "Not deployed", note: "No service attached", hint: "The hosting platform lists this agent as registered but with no service bound to it yet." },
   dead: { label: "Endpoint offline", note: "Did not respond", hint: "The published endpoint could not be reached when we last checked." },
   error: { label: "Endpoint faulty", note: "Answered incorrectly", hint: "The endpoint responded, but not in a way AgentDock could use." },
 };

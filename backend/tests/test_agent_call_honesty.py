@@ -256,7 +256,7 @@ async def test_probe_treats_task_not_found_as_live(monkeypatch, public_host):
 
 
 @pytest.mark.anyio
-async def test_probe_never_sends_an_inference_message(monkeypatch, public_host):
+async def test_probe_sends_no_message_when_the_lookup_already_answers(monkeypatch, public_host):
     client = _install(monkeypatch, [_response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}})])
 
     await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
@@ -395,3 +395,34 @@ async def test_probe_gives_up_on_a_hanging_endpoint(monkeypatch, public_host):
 
     assert status == "dead"
     assert "did not answer" in note
+
+
+@pytest.mark.anyio
+async def test_probe_falls_back_to_a_message_when_the_lookup_is_rejected(monkeypatch, public_host):
+    """An endpoint may not implement tasks/get at all. That says nothing about
+    whether it can be called, so the probe asks the way the run path would."""
+    client = _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method: tasks/get"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"parts": [{"kind": "text", "text": "pong"}]}}),
+    ])
+
+    status, _note = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+
+    assert status == "live"
+    assert [p["body"]["method"] for p in client.sent] == ["tasks/get", "message/send"]
+
+
+@pytest.mark.anyio
+async def test_reachable_is_not_callable(monkeypatch, public_host):
+    """The real case this rule exists for: one shared endpoint backed 180
+    registrations, answered every lookup, and refused each actual call with
+    "which agent?". Reachable must not be recorded as activatable."""
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method: tasks/get"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "a valid agent tokenId is required"}}),
+    ])
+
+    status, note = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+
+    assert status == "error"
+    assert "tokenId" in note

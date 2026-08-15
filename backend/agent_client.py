@@ -25,6 +25,9 @@ PROBE_TIMEOUT = httpx.Timeout(12, connect=6)
 PROBE_WALL_CLOCK = 30.0
 MAX_RESPONSE_BYTES = 1_500_000
 USER_AGENT = "AgentDock/1.0 (+https://github.com/mdlog/agentdock)"
+# Sent only when a read-only lookup left the verdict ambiguous. Kept short and
+# self-identifying so an operator reading their logs knows what it was.
+PROBE_MESSAGE = "AgentDock liveness check. Any reply confirms you are callable."
 
 
 class AgentCallError(RuntimeError):
@@ -293,12 +296,25 @@ async def _probe(kind: str, url: str) -> tuple[str, str]:
             if envelope is None:
                 return "error", "Endpoint did not answer with JSON"
             error = envelope.get("error")
-            if isinstance(error, dict):
-                message = str(error.get("message") or "")
-                if _looks_like_auth(f"{error.get('code')} {message}"):
-                    return "auth", message or "credential required"
-                return "live", f"A2A reachable ({message or 'declined the probe id'})"
-            return "live", "A2A responded"
+            if not isinstance(error, dict):
+                return "live", "A2A responded"
+            message = str(error.get("message") or "")
+            code = error.get("code")
+            if _looks_like_auth(f"{code} {message}"):
+                return "auth", message or "credential required"
+            if code == -32001 or "not found" in message.lower():
+                # The server looked the task up for us and it simply does not
+                # exist. That is proof it would accept a real call.
+                return "live", "A2A reachable (probe task not found, as expected)"
+            # It rejected the request itself, not the task — so reachable is not
+            # yet callable. One shared endpoint served 180 registrations and
+            # answered every lookup, while refusing each actual call with "which
+            # agent?". The only way to tell those apart is to make the call the
+            # run path would make, so the verdict matches what the user gets.
+            send = await _post(client, target, {"jsonrpc": "2.0", "id": 2, "method": "message/send", "params": {
+                "message": {"role": "user", "parts": [{"kind": "text", "text": PROBE_MESSAGE}], "messageId": "agentdock-probe"}}})
+            _unwrap(_sse_or_json(send.text), "message/send", tolerate_bare=True)
+            return "live", "A2A answered a probe message"
     except AgentPaymentRequired:
         return "payment", "Endpoint answers 402 — charges through its own x402 flow"
     except AgentRejected as exc:

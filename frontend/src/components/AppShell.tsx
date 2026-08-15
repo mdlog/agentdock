@@ -1,4 +1,4 @@
-import { Bot, GitCompareArrows, Search } from "lucide-react";
+import { Bot, Database, GitCompareArrows, Search } from "lucide-react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { WalletButton } from "./WalletButton";
 
@@ -8,6 +8,7 @@ export default function AppShell() {
       <Link to="/" className="brand" data-testid="brand-home-link"><span className="brand-mark"><Bot size={20} /></span><span>AgentDock</span><em>BSC</em></Link>
       <nav className="main-nav" data-testid="main-navigation">
         <NavLink to="/" end data-testid="nav-marketplace"><Search size={15} /> Marketplace</NavLink>
+        <NavLink to="/onchain" data-testid="nav-onchain"><Database size={15} /> Onchain</NavLink>
         <NavLink to="/compare" data-testid="nav-compare"><GitCompareArrows size={15} /> Compare</NavLink>
       </nav>
       <WalletButton />

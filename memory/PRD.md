@@ -86,6 +86,16 @@ Monitors onchain identity, endpoint health, task state, payment reconciliation, 
 - Responsive marketplace test shows no horizontal overflow.
 - BSC testnet RPC and ERC-8004 registry bytecode checks pass.
 
+### 2026-08-15 — 8004scan BSC Mainnet integration
+
+- Added backend-only authenticated 8004scan client using `X-API-Key`; the key is excluded from frontend bundles, API responses, DOM, console, and application logs.
+- Added bounded timeout/retry handling, rate-limit observation, strict `chainId=56` and `isTestnet=false` validation, and last-known-good retention during provider failures.
+- Synchronized a ranked sample of 100 real BSC Mainnet ERC-8004 agents from 256,506 available records into a dedicated MongoDB collection with unique `(chain_id, token_id)` upserts.
+- Preserved complete upstream payloads privately while exposing only a typed public projection and explicit 8004scan provenance labels.
+- Added a separate Onchain explorer with live search, protocol and x402-claim filters, source score/rank/feedback observations, and BscScan links.
+- Kept BSC Mainnet identity discovery separate from BSC Testnet payment execution to avoid implying production settlement readiness.
+- Removed untrusted remote image loading; deterministic local initials prevent mixed-content, localhost, and blocked-origin failures.
+
 ## Current integration status
 
 - **Binance B402 V2:** Not active. Partner credentials and merchant-specific signing schema are not available.
@@ -94,6 +104,7 @@ Monitors onchain identity, endpoint health, task state, payment reconciliation, 
 - **WalletConnect mobile:** Deferred until a WalletConnect Project ID is provided. MetaMask and Binance Wallet connectors are active.
 - **PancakeSwap:** Read-only reference snapshot is available and explicitly labeled; live adapter remains pending.
 - **ERC-8004 catalog:** Seed profiles are available; full onchain metadata/history indexer remains pending.
+- **8004scan:** Active for a 100-agent BSC Mainnet sample. The provider currently reports a 10 requests/minute limit; full 256k-record ingestion is intentionally deferred.
 
 ## Prioritized backlog
 

@@ -9,8 +9,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
-from models import Agent, AgentList, AuditEvent, CompareRequest, FeedbackRequest, IntegrationReadiness, QuoteRequest, TaskCreate, TaskDetail, TaskRecord
+from models import Agent, AgentList, AuditEvent, CompareRequest, FeedbackRequest, IntegrationReadiness, QuoteRequest, ScanAgent, ScanAgentList, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
+from scan8004 import sync_bsc_mainnet
 
 
 load_dotenv()
@@ -36,8 +37,12 @@ async def startup() -> None:
     await db.tasks.create_index("id", unique=True)
     await db.audit_events.create_index([("task_id", 1), ("created_at", 1)])
     await db.payments.create_index("tx_hash", unique=True, sparse=True)
+    await db.scan_agents.create_index([("chain_id", 1), ("token_id", 1)], unique=True)
+    await db.scan_agents.create_index([("name", "text"), ("description", "text")])
+    await db.sync_runs.create_index([("source", 1), ("chain_id", 1)], unique=True)
     if await db.agents.count_documents({}) == 0:
         await db.agents.insert_many(seed_agents())
+    app.state.scan_sync_task = __import__("asyncio").create_task(sync_bsc_mainnet(db))
 
 
 @api.get("/", tags=["system"])
@@ -66,6 +71,46 @@ async def readiness():
     if not artifacts.ready:
         notes.append("Result artifacts will use MongoDB fallback until object storage is configured.")
     return IntegrationReadiness(chain_id=97, registry_configured=bool(os.environ.get("ERC8004_IDENTITY_REGISTRY")), rpc_reachable=rpc_ok, registry_has_code=code_ok, b402_ready=b402.ready, agent_endpoints_ready=endpoints_ready, object_storage_ready=artifacts.ready, storage_mode="object_storage" if artifacts.ready else "mongodb_fallback", notes=notes)
+
+
+@api.get("/integrations/8004scan/status", tags=["system"])
+async def scan_status():
+    status = await db.sync_runs.find_one({"source": "8004scan", "chain_id": 56}, {"_id": 0})
+    return status or {"status": "never_run", "source": "8004scan", "chain_id": 56, "is_testnet": False}
+
+
+@api.get("/onchain/agents", response_model=ScanAgentList, tags=["agents"])
+async def list_onchain_agents(
+    search: str = "",
+    protocol: str | None = None,
+    x402: bool | None = None,
+    verified: bool | None = None,
+    sort: str = "score",
+):
+    query: dict = {"chain_id": 56}
+    if search:
+        query["$or"] = [
+            {"name": {"$regex": re.escape(search), "$options": "i"}},
+            {"description": {"$regex": re.escape(search), "$options": "i"}},
+        ]
+    if protocol:
+        query["supported_protocols"] = protocol
+    if x402 is not None:
+        query["x402_supported"] = x402
+    if verified is not None:
+        query["is_verified"] = verified
+    sort_map = {"score": ("total_score", -1), "rank": ("rank", 1), "feedback": ("total_feedbacks", -1), "newest": ("created_at", -1)}
+    field, direction = sort_map.get(sort, sort_map["score"])
+    items = await db.scan_agents.find(query, {"_id": 0, "raw_8004scan": 0}).sort(field, direction).to_list(100)
+    return ScanAgentList(items=items, total=len(items))
+
+
+@api.get("/onchain/agents/{token_id}", response_model=ScanAgent, tags=["agents"])
+async def get_onchain_agent(token_id: int):
+    item = await db.scan_agents.find_one({"chain_id": 56, "token_id": token_id}, {"_id": 0, "raw_8004scan": 0})
+    if not item:
+        raise HTTPException(404, "BSC Mainnet agent not found in the synchronized sample")
+    return item
 
 
 @api.get("/agents", response_model=AgentList, tags=["agents"])

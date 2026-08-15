@@ -109,3 +109,36 @@ class IntegrationReadiness(BaseModel):
     object_storage_ready: bool
     storage_mode: str
     notes: list[str]
+
+
+class ScanAgent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    chain_id: int
+    token_id: int
+    name: str
+    description: str
+    image_url: str | None = None
+    owner_address: str | None = None
+    contract_address: str | None = None
+    supported_protocols: list[str] = Field(default_factory=list)
+    x402_supported: bool
+    is_verified: bool
+    total_score: float | None = None
+    rank: int | None = None
+    health_score: float | None = None
+    total_feedbacks: int = 0
+    average_score: float | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    source: str
+    source_label: str
+    synced_at: str
+
+
+class ScanAgentList(BaseModel):
+    items: list[ScanAgent]
+    total: int
+    source: str = "8004scan"
+    chain_id: int = 56
+    is_testnet: bool = False

@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, Globe2, LockKeyhole, Zap } from "lucide-react
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, messageFromError } from "@/lib/api";
-import type { B402Resource } from "@/types";
+import type { B402Resource, OnchainAgent } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,24 +11,48 @@ import { AgentAvatar } from "@/components/AgentAvatar";
 import { WalletButton } from "@/components/WalletButton";
 import { useAccount } from "wagmi";
 
+// A common view over the two agent kinds. A b402 resource is a paid endpoint; an
+// onchain 8004scan identity with a live endpoint is activatable for free. Both
+// create a task the same way, so this page differs only in copy.
+type HireView = {
+  paid: boolean;
+  title: string;
+  description: string;
+  tags: string[];
+  endpointLabel: string;
+  iconName: string;
+  iconSrc?: string;
+};
+
 export default function HirePage() {
-  const { resourceId } = useParams();
+  const { resourceId = "" } = useParams();
   const navigate = useNavigate();
   const { address } = useAccount();
-  const [resource, setResource] = useState<B402Resource | null>(null);
+  const [view, setView] = useState<HireView | null>(null);
   const [loadError, setLoadError] = useState("");
   const [objective, setObjective] = useState("");
   const [creating, setCreating] = useState(false);
+  const isOnchain = resourceId.startsWith("bsc-");
 
   useEffect(() => {
-    api.get("/b402/resources")
-      .then(r => {
-        const found = (r.data.items as B402Resource[]).find(i => i.id === resourceId);
-        if (!found) setLoadError("This service is no longer listed in the b402 catalog.");
-        setResource(found ?? null);
-      })
-      .catch(e => setLoadError(messageFromError(e)));
-  }, [resourceId]);
+    if (isOnchain) {
+      const token = resourceId.split("-")[2];
+      api.get(`/onchain/agents/${token}?network=mainnet`)
+        .then(r => {
+          const a = r.data as OnchainAgent;
+          setView({ paid: false, title: a.name, description: a.description, tags: a.supported_protocols, endpointLabel: `Live ${(a.endpoint_kind || "").toUpperCase()} endpoint`, iconName: `${a.chain_id}-${a.token_id}-${a.name}`, iconSrc: a.has_source_icon ? `${process.env.REACT_APP_BACKEND_URL}/api/onchain/agents/mainnet/${a.token_id}/icon` : undefined });
+        })
+        .catch(e => setLoadError(messageFromError(e)));
+    } else {
+      api.get("/b402/resources")
+        .then(r => {
+          const b = (r.data.items as B402Resource[]).find(i => i.id === resourceId);
+          if (!b) { setLoadError("This service is no longer listed in the b402 catalog."); return; }
+          setView({ paid: true, title: b.host, description: b.description, tags: [b.type?.toUpperCase() || "HTTP", `x402 v${b.x402_version}`, "BNB Chain"], endpointLabel: b.resource, iconName: b.resource });
+        })
+        .catch(e => setLoadError(messageFromError(e)));
+    }
+  }, [resourceId, isOnchain]);
 
   const createTask = async () => {
     setCreating(true);
@@ -42,20 +66,20 @@ export default function HirePage() {
     }
   };
 
-  if (loadError) return <div className="page-wrap empty-state" data-testid="hire-error"><AlertTriangle size={28} /><h1>Service unavailable</h1><p>{loadError}</p><Button asChild><Link to="/">Back to marketplace</Link></Button></div>;
-  if (!resource) return <div className="page-wrap detail-loading" data-testid="hire-loading"><Skeleton className="h-40" /><Skeleton className="h-64" /></div>;
+  if (loadError) return <div className="page-wrap empty-state" data-testid="hire-error"><AlertTriangle size={28} /><h1>Agent unavailable</h1><p>{loadError}</p><Button asChild><Link to="/">Back to marketplace</Link></Button></div>;
+  if (!view) return <div className="page-wrap detail-loading" data-testid="hire-loading"><Skeleton className="h-40" /><Skeleton className="h-64" /></div>;
 
   return <div className="page-wrap hire-page">
     <Link to="/" className="back-link" data-testid="back-to-marketplace"><ArrowLeft size={15} /> Back to marketplace</Link>
 
     <section className="agent-profile-band">
-      <AgentAvatar name={resource.resource} size={68} testId="hire-avatar" className="profile-avatar" />
+      <AgentAvatar name={view.iconName} size={68} testId="hire-avatar" className="profile-avatar" src={view.iconSrc} />
       <div className="profile-title">
-        <div className="profile-name"><h1 data-testid="hire-heading">{resource.host}</h1><span className="status-live">x402</span></div>
-        <p data-testid="hire-description">{resource.description}</p>
-        <div className="capability-row"><span>{resource.type?.toUpperCase() || "HTTP"}</span><span>x402 v{resource.x402_version}</span><span>BNB Chain</span></div>
+        <div className="profile-name"><h1 data-testid="hire-heading">{view.title}</h1><span className="status-live">{view.paid ? "x402" : "activatable"}</span></div>
+        <p data-testid="hire-description">{view.description}</p>
+        <div className="capability-row">{view.tags.map(t => <span key={t}>{t}</span>)}</div>
       </div>
-      <div className="profile-price"><span>Per call</span><strong data-testid="hire-price">Quoted at run</strong></div>
+      <div className="profile-price"><span>Per call</span><strong data-testid="hire-price">{view.paid ? "Quoted at run" : "Free"}</strong></div>
     </section>
 
     <div className="detail-layout">
@@ -63,36 +87,37 @@ export default function HirePage() {
         <section className="plain-section">
           <div className="section-title"><h2><Globe2 size={17} /> Endpoint</h2></div>
           <div className="identity-list">
-            <div><span>Resource</span><strong data-testid="hire-endpoint">{resource.resource}</strong></div>
-            <div><span>Settlement</span><strong>BNB Chain · 56</strong></div>
-            <div><span>Recipient</span><strong data-testid="hire-payto">{resource.pay_to[0] ?? "Quoted at run"}</strong></div>
-            <div><span>Listed by</span><strong>{resource.source_label}</strong></div>
+            <div><span>{view.paid ? "Resource" : "Live endpoint"}</span><strong data-testid="hire-endpoint">{view.endpointLabel}</strong></div>
+            <div><span>Settlement</span><strong>{view.paid ? "BNB Chain · 56" : "None — free to run"}</strong></div>
+            <div><span>Source</span><strong>{view.paid ? "b402 Bazaar · BNB Chain" : "8004scan · BNB Chain"}</strong></div>
           </div>
         </section>
 
         <section className="risk-band" data-testid="hire-safety-boundary">
           <LockKeyhole size={20} />
           <div>
-            <strong>You approve the payment, nobody else</strong>
-            <p>AgentDock never holds a key. The merchant quotes its price when the task runs; the exact token, amount and recipient are shown before your wallet is asked to sign anything.</p>
+            <strong>{view.paid ? "You approve the payment, nobody else" : "You run it, nothing is charged"}</strong>
+            <p>{view.paid
+              ? "AgentDock never holds a key. The merchant quotes its price when the task runs; the exact token, amount and recipient are shown before your wallet is asked to sign anything."
+              : "This agent exposes a live endpoint and does not charge. AgentDock calls it with your objective and returns the real result — no signature, no payment."}</p>
           </div>
         </section>
       </div>
 
       <aside className="task-panel" data-testid="hire-composer">
-        <div className="task-panel-heading"><span><Zap size={14} /> Hire agent</span><strong>Pay per call</strong></div>
+        <div className="task-panel-heading"><span><Zap size={14} /> {view.paid ? "Hire agent" : "Activate agent"}</span><strong>{view.paid ? "Pay per call" : "Free"}</strong></div>
         <label htmlFor="objective">What should the agent do?</label>
         <Textarea id="objective" data-testid="hire-objective-input" value={objective} onChange={e => setObjective(e.target.value)} rows={6} placeholder="Describe the request. It is sent to the agent as its query." />
         <div className="transaction-preview">
-          <h3>Before you sign</h3>
+          <h3>Before you run</h3>
           <div><span>Network</span><strong>BNB Chain · 56</strong></div>
-          <div><span>Price</span><strong>Quoted by the merchant</strong></div>
-          <div><span>Gas from you</span><strong>None · EIP-3009</strong></div>
-          <div><span>Permissions</span><strong>Single payment · no approval</strong></div>
+          <div><span>Price</span><strong>{view.paid ? "Quoted by the merchant" : "Free"}</strong></div>
+          <div><span>Gas from you</span><strong>None</strong></div>
+          <div><span>Permissions</span><strong>{view.paid ? "Single payment · no approval" : "Read-only call · no signature"}</strong></div>
         </div>
-        {!address && <WalletButton />}
+        {!address && view.paid && <WalletButton />}
         <Button data-testid="create-hire-task-button" className="w-full" onClick={createTask} disabled={creating || objective.trim().length < 12}>
-          {creating ? "Creating task…" : "Create task & get price"}
+          {creating ? "Creating task…" : view.paid ? "Create task & get price" : "Create task & run"}
         </Button>
         {objective.trim().length > 0 && objective.trim().length < 12 && <p className="payment-locked" data-testid="hire-objective-warning"><AlertTriangle size={14} /> Describe the request in at least 12 characters.</p>}
       </aside>

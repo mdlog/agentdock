@@ -44,7 +44,11 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
 
       {compare && (
         <div className="onchain-hire-row" data-testid={`onchain-hire-row-${agent.token_id}`}>
-          <div><strong data-testid={`onchain-price-${agent.token_id}`}>Not published onchain</strong><span>Price per run</span></div>
+          <div>
+            {agent.activatable
+              ? <><strong data-testid={`onchain-status-${agent.token_id}`} className="activatable-tag">Live {agent.endpoint_kind?.toUpperCase()} endpoint</strong><span>Free to activate</span></>
+              : <><strong data-testid={`onchain-price-${agent.token_id}`}>Identity only</strong><span>No callable endpoint</span></>}
+          </div>
           <div className="card-actions">
             <Button
               data-testid={`compare-onchain-${agent.token_id}`}
@@ -55,9 +59,9 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
             >
               {compare.selected && <Check size={14} />}{compare.selected ? "Selected" : "Compare"}
             </Button>
-            <Button data-testid={`hire-onchain-${agent.token_id}`} size="sm" disabled title="This agent publishes no price or callable endpoint onchain, so it cannot be hired through AgentDock yet.">
-              Hire
-            </Button>
+            {agent.activatable
+              ? <Button data-testid={`activate-onchain-${agent.token_id}`} size="sm" asChild><Link to={`/hire/${agent.id}`}>Activate</Link></Button>
+              : <Button data-testid={`hire-onchain-${agent.token_id}`} size="sm" disabled title="This agent publishes no callable endpoint, so it cannot be activated yet.">Activate</Button>}
           </div>
         </div>
       )}

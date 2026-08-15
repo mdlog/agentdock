@@ -85,8 +85,11 @@ export default function TaskPage() {
 
     {task.state === "created" && <section className="blocked-payment" data-testid="task-run-panel">
       <Play size={22} />
-      <div><h2>Ask the agent for its price</h2><p>AgentDock calls the endpoint once without paying. The merchant answers with the exact token, amount and recipient — nothing is signed at this step.</p></div>
-      <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? "Asking…" : "Get price"}</Button>
+      {task.endpoint_kind
+        ? <><div><h2>Run this agent</h2><p>AgentDock calls the agent's live {task.endpoint_kind.toUpperCase()} endpoint with your objective and returns the real result. This agent does not charge — no signature, no payment.</p></div>
+            <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? "Running…" : "Run agent"}</Button></>
+        : <><div><h2>Ask the agent for its price</h2><p>AgentDock calls the endpoint once without paying. The merchant answers with the exact token, amount and recipient — nothing is signed at this step.</p></div>
+            <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? "Asking…" : "Get price"}</Button></>}
     </section>}
 
     {task.state === "payment_pending" && terms && <section className="payment-panel" data-testid="task-payment-panel">

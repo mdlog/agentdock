@@ -81,6 +81,7 @@ class TaskRecord(BaseModel):
     payment_terms: dict[str, Any] | None = None
     settlement: dict[str, Any] | None = None
     result_preview: str | None = None
+    endpoint_kind: str | None = None
     quote_id: str | None = None
     quote_expires_at: str | None = None
     tx_hash: str | None = None
@@ -138,6 +139,8 @@ class ScanAgent(BaseModel):
     contract_address: str | None = None
     supported_protocols: list[str] = Field(default_factory=list)
     categories: list[str] = Field(default_factory=list)
+    activatable: bool = False
+    endpoint_kind: str | None = None
     x402_supported: bool
     is_verified: bool
     total_score: float | None = None

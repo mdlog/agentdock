@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import os
 import re
@@ -8,6 +9,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
+import agent_client
 import b402
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import Agent, AgentList, AuditEvent, AuthorizeRequest, CompareRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
@@ -178,6 +180,51 @@ async def scan_status(network: str = "mainnet"):
     stored = await db.scan_agents.count_documents({"chain_id": chain_id})
     result = status or {"status": "never_run", "source": "8004scan", "chain_id": chain_id, "is_testnet": network == "testnet"}
     return {**result, "feedback_sample": feedback_count, "stored_agents": stored, "full_sync": full or {"status": "never_run"}}
+
+
+async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
+    """Resolve callable endpoints for categorized agents and flag the activatable
+    ones. Bounded to the categorized set (a few hundred) — those are what the
+    marketplace browses — and paced under the 8004scan budget."""
+    key = {"source": "endpoint_enrich", "chain_id": chain_id}
+    await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": now_iso()}}, upsert=True)
+    cursor = db.scan_agents.find(
+        {"chain_id": chain_id, "categories": {"$ne": []}, "endpoint_checked": {"$ne": True}},
+        {"_id": 0, "id": 1, "chain_id": 1, "token_id": 1, "raw_8004scan_detail": 1},
+    ).limit(limit)
+    client = Scan8004Client()
+    checked = activatable = 0
+    try:
+        for agent in await cursor.to_list(limit):
+            try:
+                detail = await client.agent_detail(chain_id, agent["token_id"])
+            except Scan8004Error:
+                detail = agent.get("raw_8004scan_detail") or {}
+            ep = agent_client.pick_endpoint(detail)
+            update = {"endpoint_checked": True}
+            if ep:
+                update.update({"endpoint_kind": ep[0], "agent_endpoint": ep[1], "activatable": True})
+                activatable += 1
+            else:
+                update["activatable"] = False
+            await db.scan_agents.update_one({"chain_id": chain_id, "token_id": agent["token_id"]}, {"$set": update})
+            checked += 1
+            await asyncio.sleep(0.34)
+        result = {"status": "success", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked, "activatable": activatable, "completed_at": now_iso()}
+    except Exception as exc:
+        result = {"status": "degraded", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked, "activatable": activatable, "error": str(exc), "failed_at": now_iso()}
+    await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
+    return result
+
+
+@api.post("/onchain/enrich-endpoints", tags=["agents"])
+async def trigger_enrich(network: str = "mainnet"):
+    chain_id = 97 if network == "testnet" else 56
+    running = await db.sync_runs.find_one({"source": "endpoint_enrich", "chain_id": chain_id})
+    if running and running.get("status") == "running":
+        raise HTTPException(409, "Endpoint enrichment already running")
+    app.state.enrich_task = __import__("asyncio").create_task(enrich_endpoints(chain_id))
+    return {"status": "started", "chain_id": chain_id}
 
 
 @api.get("/categories", tags=["agents"])
@@ -380,12 +427,28 @@ async def create_task(payload: TaskCreate):
     if blocked:
         raise HTTPException(422, f"Unsafe request rejected: '{blocked}' is outside the research-only schema")
     stamp, task_id = now_iso(), str(uuid.uuid4())
+    extra: dict = {}
     if payload.agent_id.startswith("b402-"):
         resource = await db.b402_resources.find_one({"id": payload.agent_id}, {"_id": 0})
         if not resource:
             raise HTTPException(404, "Agent not found")
         # No price yet: the merchant quotes it in its 402 response at run time.
         agent_id, agent_name, price = resource["id"], resource["host"], None
+    elif payload.agent_id.startswith("bsc-"):
+        # An onchain 8004scan identity. Activatable only if it publishes a
+        # callable endpoint; resolve it now so run has something to call.
+        agent = await db.scan_agents.find_one({"id": payload.agent_id}, {"_id": 0, "raw_8004scan": 0})
+        if not agent:
+            raise HTTPException(404, "Agent not found")
+        endpoint = agent.get("agent_endpoint")
+        kind = agent.get("endpoint_kind")
+        if not endpoint:
+            detail = await _resolve_endpoint(agent)
+            if not detail:
+                raise HTTPException(409, "This agent publishes no callable endpoint, so it cannot be activated.")
+            kind, endpoint = detail
+        agent_id, agent_name, price = agent["id"], agent["name"], None
+        extra = {"agent_endpoint": endpoint, "endpoint_kind": kind}
     else:
         agent = await db.agents.find_one({"id": payload.agent_id}, {"_id": 0})
         if not agent:
@@ -393,7 +456,7 @@ async def create_task(payload: TaskCreate):
         if agent["status"] != "active":
             raise HTTPException(409, "Agent is currently offline")
         agent_id, agent_name, price = agent["id"], agent["name"], agent["price_usd"]
-    task = {"id": task_id, "agent_id": agent_id, "agent_name": agent_name, "objective": payload.objective, "constraints": payload.constraints, "wallet_address": payload.wallet_address, "state": "created", "estimated_price_usd": price, "payment_terms": None, "settlement": None, "result_preview": None, "quote_id": None, "quote_expires_at": None, "tx_hash": None, "result": None, "created_at": stamp, "updated_at": stamp}
+    task = {"id": task_id, "agent_id": agent_id, "agent_name": agent_name, "objective": payload.objective, "constraints": payload.constraints, "wallet_address": payload.wallet_address, "state": "created", "estimated_price_usd": price, "payment_terms": None, "settlement": None, "result_preview": None, "quote_id": None, "quote_expires_at": None, "tx_hash": None, "result": None, "created_at": stamp, "updated_at": stamp, **extra}
     await db.tasks.insert_one(task.copy())
     await audit(task_id, "task.created", "Research task accepted; no payment or agent execution has occurred.")
     return task
@@ -406,6 +469,15 @@ async def get_task(task_id: str):
         raise HTTPException(404, "Task not found")
     events = await db.audit_events.find({"task_id": task_id}, {"_id": 0}).sort("created_at", 1).to_list(100)
     return TaskDetail(task=task, audit_events=events)
+
+
+async def _resolve_endpoint(agent: dict) -> tuple[str, str] | None:
+    """Fetch an onchain agent's detail and return (kind, url) of a live endpoint."""
+    try:
+        detail = await Scan8004Client().agent_detail(agent["chain_id"], agent["token_id"])
+    except Scan8004Error:
+        detail = agent.get("raw_8004scan_detail") or {}
+    return agent_client.pick_endpoint(detail)
 
 
 async def _b402_task(task_id: str) -> tuple[dict, dict]:
@@ -424,10 +496,44 @@ def _call_params(task: dict, resource: dict) -> dict:
 
 @api.post("/tasks/{task_id}/run", tags=["tasks"])
 async def run_task(task_id: str):
-    """Call the merchant unpaid. A 200 completes the task; a 402 quotes the terms."""
-    task, resource = await _b402_task(task_id)
+    """Run the task against its agent. Onchain agents are called directly; b402
+    resources go through the payment challenge."""
+    task = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if not task:
+        raise HTTPException(404, "Task not found")
     if task["state"] not in ("created", "payment_pending"):
         raise HTTPException(409, f"Task is already {task['state']}")
+    if task.get("agent_endpoint"):
+        return await _run_onchain_agent(task)
+    return await _run_b402(task_id, task)
+
+
+async def _run_onchain_agent(task: dict) -> dict:
+    task_id = task["id"]
+    try:
+        result = await agent_client.call_agent(task["endpoint_kind"], task["agent_endpoint"], task["objective"])
+    except agent_client.AgentPaymentRequired:
+        # A paying onchain agent (e.g. an x402 A2A endpoint). Its settlement may
+        # be off-BNB-Chain, so it is surfaced honestly rather than half-charged.
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "updated_at": now_iso()}})
+        await audit(task_id, "payment.required", "This agent requires payment through its own x402 endpoint; direct settlement is not yet wired.")
+        raise HTTPException(409, "This agent charges through its own x402 endpoint, which AgentDock does not settle yet.")
+    except agent_client.AgentCallError as exc:
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "updated_at": now_iso()}})
+        await audit(task_id, "run.failed", f"Agent endpoint could not be reached safely: {exc}")
+        raise HTTPException(502, str(exc)) from exc
+    output = result.get("output") or ""
+    await db.tasks.update_one({"id": task_id}, {"$set": {
+        "state": "completed", "result": result, "result_preview": output[:1200],
+        "estimated_price_usd": 0.0, "updated_at": now_iso()}})
+    await audit(task_id, "run.completed", f"Agent executed over {result.get('transport', 'its endpoint')} and returned a result. No payment was required.")
+    return {"state": "completed", "paid": False, "result_preview": output[:1200], "transport": result.get("transport")}
+
+
+async def _run_b402(task_id: str, task: dict) -> dict:
+    resource = await db.b402_resources.find_one({"id": task["agent_id"]}, {"_id": 0})
+    if not resource:
+        raise HTTPException(409, "This task is not attached to a runnable agent")
     try:
         challenge, response = await b402.fetch_challenge(resource["resource"], params=_call_params(task, resource))
     except b402.B402Error as exc:

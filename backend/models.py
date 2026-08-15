@@ -157,6 +157,8 @@ class ScanAgentList(BaseModel):
     source: str = "8004scan"
     chain_id: int = 56
     is_testnet: bool = False
+    offset: int = 0
+    limit: int = 60
 
 
 class ScanFeedback(BaseModel):

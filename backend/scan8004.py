@@ -91,6 +91,25 @@ class Scan8004Client:
     async def list_bsc_testnet(self, page: int = 1, limit: int = 100) -> tuple[list[dict], dict, dict]:
         return await self._list_agents(TESTNET_CHAIN_ID, True, page, limit)
 
+    async def list_all_agents(self, chain_id: int, offset: int, limit: int = 100) -> tuple[list[dict], int | None]:
+        """Offset-paged listing from the 180/min route, for full-catalog ingestion.
+
+        Note the parameter name: this route filters on `chain_id`, while /public
+        wants `chainId`. Passing the camelCase spelling here is silently ignored
+        and returns agents from every chain mixed together.
+        """
+        response = await self._get("/agents", {"chain_id": chain_id, "limit": limit, "offset": offset}, base=self.detail_base_url)
+        try:
+            payload = response.json()
+            items = payload.get("items")
+        except (ValueError, AttributeError) as exc:
+            raise Scan8004Error("Malformed 8004scan catalog response") from exc
+        if not isinstance(items, list):
+            raise Scan8004Error("Malformed 8004scan catalog response")
+        if any(row.get("chain_id") != chain_id for row in items):
+            raise Scan8004Error("8004scan returned records outside the requested chain")
+        return items, payload.get("total")
+
     async def list_feedbacks(self, chain_id: int, is_testnet: bool, page: int = 1, limit: int = 100) -> tuple[list[dict], dict]:
         response = await self._get("/feedbacks", {"page": page, "limit": limit, "chainId": chain_id})
         try:
@@ -268,6 +287,63 @@ async def _sync_agents(db, chain_id: int, is_testnet: bool) -> dict:
         result = {"status": "degraded", "source": SOURCE, "chain_id": chain_id, "is_testnet": is_testnet, "imported": imported, "error": message, "failed_at": utc_now()}
         await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
         return result
+
+
+FULL_SYNC_SOURCE = "8004scan_full"
+
+
+async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int = 100, pace: float = 0.4, concurrency: int = 4, start_offset: int = 0) -> dict:
+    """Ingest every agent on one chain, not just the first ranked page.
+
+    Pages are fetched `concurrency` at a time. Sequentially this managed only
+    ~25 requests a minute — each round trip costs about 1.5s and nothing
+    overlapped — so it used a seventh of the 180/min budget and would have taken
+    over an hour. Four in flight lands near 160/min, inside the budget.
+
+    Writes in bulk because 2500-odd single upserts would spend longer in round
+    trips than in the network calls, and records `offset` after every batch so a
+    failed or interrupted run can resume instead of starting over.
+    """
+    from pymongo import UpdateOne
+
+    key = {"source": FULL_SYNC_SOURCE, "chain_id": chain_id}
+    await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": utc_now(), "error": None}}, upsert=True)
+
+    client = Scan8004Client()
+    imported, offset, available = 0, start_offset, None
+    try:
+        while True:
+            offsets = [offset + i * page_size for i in range(concurrency)]
+            pages = await asyncio.gather(*(client.list_all_agents(chain_id, o, page_size) for o in offsets))
+            rows = [row for page, total in pages for row in page]
+            for _, total in pages:
+                if total is not None:
+                    available = total
+            if not rows:
+                break
+            ops = []
+            for raw in rows:
+                projection = public_projection(raw, chain_id, bool(raw.get("is_testnet")))
+                ops.append(UpdateOne(
+                    {"chain_id": chain_id, "token_id": projection["token_id"]},
+                    {"$set": {**projection, "raw_8004scan": raw, "synced_at": utc_now()}},
+                    upsert=True,
+                ))
+            await db.scan_agents.bulk_write(ops, ordered=False)
+            imported += len(rows)
+            offset += page_size * concurrency
+            await db.sync_runs.update_one(key, {"$set": {"imported": imported, "available_total": available, "offset": offset}})
+            if available is not None and offset >= available:
+                break
+            await asyncio.sleep(pace)
+        result = {"status": "success", "source": FULL_SYNC_SOURCE, "chain_id": chain_id, "imported": imported, "available_total": available, "completed_at": utc_now(), "error": None}
+    except Exception as exc:
+        message = str(exc) if isinstance(exc, Scan8004Error) else "Unexpected full synchronization error"
+        # Partial progress is kept: rows already written stay, and the run is
+        # restartable from the recorded offset.
+        result = {"status": "degraded", "source": FULL_SYNC_SOURCE, "chain_id": chain_id, "imported": imported, "available_total": available, "offset": offset, "error": message, "failed_at": utc_now()}
+    await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
+    return result
 
 
 async def sync_feedbacks(db, chain_id: int, is_testnet: bool) -> dict:

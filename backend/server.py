@@ -12,7 +12,7 @@ import b402
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import Agent, AgentList, AuditEvent, AuthorizeRequest, CompareRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
-from scan8004 import Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
+from scan8004 import Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
 from icon_proxy import get_agent_icon
 
 
@@ -47,6 +47,11 @@ async def startup() -> None:
     await db.payments.create_index("tx_hash", unique=True, sparse=True)
     await db.scan_agents.create_index([("chain_id", 1), ("token_id", 1)], unique=True)
     await db.scan_agents.create_index([("name", "text"), ("description", "text")])
+    # Sorting a 256k catalogue with skip/limit needs these; without them every
+    # page past the first scans the collection.
+    await db.scan_agents.create_index([("chain_id", 1), ("total_score", -1)])
+    await db.scan_agents.create_index([("chain_id", 1), ("rank", 1)])
+    await db.scan_agents.create_index([("chain_id", 1), ("total_feedbacks", -1)])
     await db.sync_runs.create_index([("source", 1), ("chain_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("feedback_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("agent_id", 1), ("submitted_at", -1)])
@@ -139,15 +144,37 @@ async def readiness():
     return IntegrationReadiness(chain_id=CHAIN_ID, registry_configured=bool(os.environ.get("ERC8004_IDENTITY_REGISTRY")), rpc_reachable=rpc_ok, registry_has_code=code_ok, b402_ready=b402_merchant.ready, agent_endpoints_ready=endpoints_ready, object_storage_ready=artifacts.ready, storage_mode="object_storage" if artifacts.ready else "mongodb_fallback", notes=notes)
 
 
+@api.post("/onchain/sync-all", tags=["agents"])
+async def trigger_full_sync(network: str = "mainnet"):
+    """Ingest the whole chain catalogue in the background.
+
+    Deliberately not a startup task: it runs for about fourteen minutes, and the
+    ranked first page already gives the app usable data immediately.
+    """
+    if network not in ("mainnet", "testnet"):
+        raise HTTPException(400, "network must be mainnet or testnet")
+    chain_id = 97 if network == "testnet" else 56
+    previous = await db.sync_runs.find_one({"source": "8004scan_full", "chain_id": chain_id})
+    if previous and previous.get("status") == "running":
+        raise HTTPException(409, "A full synchronization is already running")
+    # Resume where the last run stopped. Upserts are keyed on (chain_id, token_id)
+    # so re-covering ground is harmless, but skipping it saves many minutes.
+    start_offset = int(previous.get("offset") or 0) if previous and previous.get("status") == "degraded" else 0
+    app.state.full_sync_task = __import__("asyncio").create_task(sync_all_agents(db, chain_id, start_offset=start_offset))
+    return {"status": "started", "chain_id": chain_id, "start_offset": start_offset, "poll": f"/api/integrations/8004scan/status?network={network}"}
+
+
 @api.get("/integrations/8004scan/status", tags=["system"])
 async def scan_status(network: str = "mainnet"):
     if network not in ("mainnet", "testnet"):
         raise HTTPException(400, "network must be mainnet or testnet")
     chain_id = 97 if network == "testnet" else 56
     status = await db.sync_runs.find_one({"source": "8004scan", "chain_id": chain_id}, {"_id": 0})
+    full = await db.sync_runs.find_one({"source": "8004scan_full", "chain_id": chain_id}, {"_id": 0})
     feedback_count = await db.scan_feedbacks.count_documents({"chain_id": chain_id})
+    stored = await db.scan_agents.count_documents({"chain_id": chain_id})
     result = status or {"status": "never_run", "source": "8004scan", "chain_id": chain_id, "is_testnet": network == "testnet"}
-    return {**result, "feedback_sample": feedback_count}
+    return {**result, "feedback_sample": feedback_count, "stored_agents": stored, "full_sync": full or {"status": "never_run"}}
 
 
 @api.get("/onchain/agents", response_model=ScanAgentList, tags=["agents"])
@@ -158,6 +185,8 @@ async def list_onchain_agents(
     x402: bool | None = None,
     verified: bool | None = None,
     sort: str = "score",
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=60, ge=1, le=200),
 ):
     if network not in ("mainnet", "testnet"):
         raise HTTPException(400, "network must be mainnet or testnet")
@@ -176,8 +205,11 @@ async def list_onchain_agents(
         query["is_verified"] = verified
     sort_map = {"score": ("total_score", -1), "rank": ("rank", 1), "feedback": ("total_feedbacks", -1), "newest": ("created_at", -1)}
     field, direction = sort_map.get(sort, sort_map["score"])
-    items = await db.scan_agents.find(query, {"_id": 0, "raw_8004scan": 0}).sort(field, direction).to_list(100)
-    return ScanAgentList(items=items, total=len(items), chain_id=chain_id, is_testnet=is_testnet)
+    # total is the number of matching rows, not the size of this page: the UI
+    # needs it to render pagination over a catalogue it never receives whole.
+    total = await db.scan_agents.count_documents(query)
+    items = await db.scan_agents.find(query, {"_id": 0, "raw_8004scan": 0}).sort(field, direction).skip(offset).limit(limit).to_list(limit)
+    return ScanAgentList(items=items, total=total, chain_id=chain_id, is_testnet=is_testnet, offset=offset, limit=limit)
 
 
 @api.get("/onchain/agents/{token_id}", response_model=ScanAgent, tags=["agents"])

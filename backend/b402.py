@@ -37,6 +37,9 @@ MAX_RESPONSE_BYTES = 2_000_000
 # party we do not control. Denominated in whole tokens (all BSC assets are 18dp).
 MAX_AMOUNT_TOKENS = 1.0
 
+# Used when the merchant quotes no validity window of its own.
+DEFAULT_VALIDITY_SECONDS = 60
+
 USER_AGENT = "AgentDock/1.0 (+https://github.com/mdlog/agentdock)"
 
 TRANSFER_WITH_AUTHORIZATION_TYPES = {
@@ -137,7 +140,10 @@ def describe_terms(accept: dict[str, Any]) -> dict[str, Any]:
         "amount_tokens": tokens,
         "decimals": decimals,
         "pay_to": accept.get("payTo"),
-        "max_timeout_seconds": accept.get("maxTimeoutSeconds"),
+        # Merchants may omit this. authorize_task has always fallen back to 60s
+        # when minting the authorization, so the figure shown to the user is the
+        # same one their signature will actually carry.
+        "max_timeout_seconds": int(accept.get("maxTimeoutSeconds") or DEFAULT_VALIDITY_SECONDS),
         "transfer_method": extra.get("assetTransferMethod"),
     }
 

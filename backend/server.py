@@ -636,7 +636,7 @@ async def authorize_task(task_id: str, payload: AuthorizeRequest):
     # Minted fresh on every attempt: the merchant's window is short, and a reused
     # nonce would let the same authorization be replayed.
     now = int(datetime.now(timezone.utc).timestamp())
-    valid_before = now + int(accept.get("maxTimeoutSeconds") or 60)
+    valid_before = now + int(accept.get("maxTimeoutSeconds") or b402.DEFAULT_VALIDITY_SECONDS)
     nonce = "0x" + uuid.uuid4().hex + uuid.uuid4().hex
     typed_data = b402.build_typed_data(accept, payload.payer, now - 5, valid_before, nonce)
     await db.tasks.update_one({"id": task_id}, {"$set": {"b402_authorization": typed_data["message"], "wallet_address": payload.payer, "updated_at": now_iso()}})

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, ArrowLeft, Globe2, LockKeyhole, Zap } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Globe2, Loader2, LockKeyhole, Zap } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, messageFromError } from "@/lib/api";
@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { UNAVAILABLE, UNCHECKED } from "@/components/OnchainAgentCard";
+import { FlowRail, FREE_FLOW, PAID_FLOW } from "@/components/FlowRail";
 import { WalletButton } from "@/components/WalletButton";
 import { useAccount } from "wagmi";
 
@@ -85,6 +86,8 @@ export default function HirePage() {
   return <div className="page-wrap hire-page">
     <Link to="/" className="back-link" data-testid="back-to-marketplace"><ArrowLeft size={15} /> Back to marketplace</Link>
 
+    <FlowRail steps={view.paid ? PAID_FLOW : FREE_FLOW} current={0} testId="hire-flow-rail" />
+
     <section className="agent-profile-band">
       <AgentAvatar name={view.iconName} size={68} testId="hire-avatar" className="profile-avatar" src={view.iconSrc} />
       <div className="profile-title">
@@ -132,10 +135,11 @@ export default function HirePage() {
         </div>
         {!address && view.paid && <WalletButton />}
         <Button data-testid="create-hire-task-button" className="w-full" onClick={createTask} disabled={!view.runnable || creating || objective.trim().length < 12}>
-          {creating ? "Creating task…" : !view.runnable ? "Cannot be run" : view.paid ? "Create task & get price" : "Create task & run"}
+          {creating ? <><Loader2 size={15} className="spin" /> Creating task…</> : !view.runnable ? "Cannot be run" : view.paid ? "Create task & get price" : "Create task & run"}
         </Button>
         {!view.runnable && <p className="payment-locked" data-testid="hire-blocked-reason"><AlertTriangle size={14} /> {view.blockedReason}</p>}
         {objective.trim().length > 0 && objective.trim().length < 12 && <p className="payment-locked" data-testid="hire-objective-warning"><AlertTriangle size={14} /> Describe the request in at least 12 characters.</p>}
+        {view.runnable && <p className="next-step" data-testid="hire-next-step">Next: {view.paid ? "the merchant quotes its price. Nothing is signed until you approve it." : "AgentDock calls the endpoint and shows you what it returns."}</p>}
       </aside>
     </div>
   </div>;

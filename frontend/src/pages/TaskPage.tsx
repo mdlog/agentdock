@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Check, Circle, Clock3, ExternalLink, FileSearch, PenLine, Play } from "lucide-react";
+import { AlertTriangle, Clock3, ExternalLink, FileSearch, Loader2, PenLine, Play } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { useAccount, useChainId, useSignTypedData, useSwitchChain } from "wagmi";
 import { toast } from "sonner";
@@ -8,9 +8,15 @@ import type { AuditEvent, Task, TypedData } from "@/types";
 import { Button } from "@/components/ui/button";
 import { WalletButton } from "@/components/WalletButton";
 import { DEFAULT_CHAIN } from "@/lib/erc8004";
+import { FlowRail, FREE_FLOW, PAID_FLOW } from "@/components/FlowRail";
 
-const stages = ["created", "payment_pending", "paid", "completed"];
-const stageLabel: Record<string, string> = { created: "created", payment_pending: "priced", paid: "paid", completed: "completed" };
+// Where the task sits on its rail. A free agent is never priced or signed, so
+// it runs the three-step flow; only a b402 task has a payment stage to be at.
+const railPosition = (state: string, paid: boolean, busy: boolean) => {
+  if (paid) return Math.max(0, PAID_FLOW.findIndex(s => s.key === state));
+  if (state === "completed") return 2;
+  return busy ? 1 : 0;
+};
 
 export default function TaskPage() {
   const { taskId } = useParams();
@@ -81,22 +87,29 @@ export default function TaskPage() {
   if (loadError) return <div className="page-wrap empty-state" data-testid="task-detail-error"><AlertTriangle size={28} /><h1>Task unavailable</h1><p>{loadError}</p><Button data-testid="task-error-home-button" asChild><Link to="/">Back to marketplace</Link></Button></div>;
   if (!task) return <div className="page-wrap" data-testid="task-loading">Loading task…</div>;
 
-  const current = Math.max(0, stages.indexOf(task.state));
+  const paidFlow = !task.endpoint_kind;
+  const steps = paidFlow ? PAID_FLOW : FREE_FLOW;
+  const failed = task.state === "failed" || task.state === "manual_resolution";
+  // A failed task marks the step that actually failed, not step one: being
+  // described succeeded, and a priced task that fails did so at signing.
+  const current = failed
+    ? (paidFlow ? (task.payment_terms ? 2 : 1) : 1)
+    : railPosition(task.state, paidFlow, !!busy);
   const terms = task.payment_terms;
   const wrongChain = !!address && chainId !== DEFAULT_CHAIN.chainId;
 
   return <div className="page-wrap task-page">
     <div className="page-heading"><div><p className="section-kicker">Task execution</p><h1 data-testid="task-heading">{task.agent_name}</h1><p data-testid="task-id">Task {task.id}</p></div><span className={`task-status status-${task.state}`} data-testid="task-current-status">{task.state.replace("_", " ")}</span></div>
 
-    <section className="state-track" data-testid="task-state-track">{stages.map((stage, index) => <div className={index <= current ? "reached" : ""} key={stage}><span>{index < current ? <Check size={15} /> : <Circle size={15} />}</span><strong data-testid={`task-stage-${stage}`}>{stageLabel[stage]}</strong></div>)}</section>
+    <FlowRail steps={steps} current={current} busy={!!busy} failed={failed} testId="task-state-track" />
 
     {task.state === "created" && <section className="blocked-payment" data-testid="task-run-panel">
       <Play size={22} />
       {task.endpoint_kind
         ? <><div><h2>Run this agent</h2><p>AgentDock calls the agent's live {task.endpoint_kind.toUpperCase()} endpoint with your objective and returns the real result. This agent does not charge — no signature, no payment.</p></div>
-            <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? "Running…" : "Run agent"}</Button></>
+            <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? <><Loader2 size={15} className="spin" /> Running…</> : "Run agent"}</Button></>
         : <><div><h2>Ask the agent for its price</h2><p>AgentDock calls the endpoint once without paying. The merchant answers with the exact token, amount and recipient — nothing is signed at this step.</p></div>
-            <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? "Asking…" : "Get price"}</Button></>}
+            <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? <><Loader2 size={15} className="spin" /> Asking…</> : "Get price"}</Button></>}
     </section>}
 
     {task.state === "payment_pending" && terms && <section className="payment-panel" data-testid="task-payment-panel">
@@ -114,7 +127,7 @@ export default function TaskPage() {
       <div className="payment-action">
         {!address ? <WalletButton />
           : wrongChain ? <Button data-testid="switch-pay-chain-button" onClick={() => switchChain({ chainId: DEFAULT_CHAIN.chainId })}>Switch to {DEFAULT_CHAIN.label}</Button>
-          : <Button data-testid="sign-and-pay-button" onClick={payTask} disabled={busy === "pay"}>{busy === "pay" ? "Waiting for your wallet…" : `Sign & pay ${terms.amount_tokens} ${terms.asset_name}`}</Button>}
+          : <Button data-testid="sign-and-pay-button" onClick={payTask} disabled={busy === "pay"}>{busy === "pay" ? <><Loader2 size={15} className="spin" /> Waiting for your wallet…</> : `Sign & pay ${terms.amount_tokens} ${terms.asset_name}`}</Button>}
         <p className="payment-locked"><AlertTriangle size={14} /> Your wallet signs an authorization. AgentDock never holds your key.</p>
       </div>
     </section>}
@@ -132,10 +145,10 @@ export default function TaskPage() {
     <section className="result-zone" data-testid="task-result-zone">
       <div>
         <p className="section-kicker">Result</p>
-        <h2>{task.result_preview ? "Agent responded" : "No result yet"}</h2>
+        <h2>{failed ? "The agent did not complete this" : task.result_preview ? "Agent responded" : "No result yet"}</h2>
         {task.result_preview
           ? <pre className="result-body" data-testid="task-result-body">{task.result_preview}</pre>
-          : <p>The agent runs once its payment is settled.</p>}
+          : <p>{paidFlow ? "The agent runs once its payment is settled." : "The agent runs as soon as you start it."}</p>}
       </div>
       {task.tx_hash
         ? <a href={`${DEFAULT_CHAIN.explorer}/tx/${task.tx_hash}`} target="_blank" rel="noreferrer" data-testid="task-transaction-link">View settlement <ExternalLink size={14} /></a>

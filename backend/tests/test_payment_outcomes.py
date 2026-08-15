@@ -110,3 +110,24 @@ def test_corrupt_receipt_is_not_mistaken_for_a_missing_one():
     challenge decoder has always raised on this, and so must this one."""
     with pytest.raises(b402.B402Error):
         b402.decode_settlement(_response_with("!!!not base64!!!"))
+
+
+def test_quoted_validity_window_is_never_blank():
+    """Merchants may omit maxTimeoutSeconds. The signing path has always fallen
+    back to 60s, so the terms shown must carry that same number rather than a
+    None that renders as "Valid for: s after signing"."""
+    terms = b402.describe_terms({
+        "network": b402.BSC_NETWORK, "amount": "70000000000000000", "payTo": "0x" + "1" * 40,
+        "asset": "0x" + "2" * 40, "extra": {"decimals": 18, "name": "United Stables", "assetTransferMethod": "eip3009"},
+    })
+
+    assert terms["max_timeout_seconds"] == b402.DEFAULT_VALIDITY_SECONDS
+
+
+def test_merchant_validity_window_is_respected_when_given():
+    terms = b402.describe_terms({
+        "network": b402.BSC_NETWORK, "amount": "1000", "payTo": "0x" + "1" * 40, "asset": "0x" + "2" * 40,
+        "maxTimeoutSeconds": 300, "extra": {"decimals": 18, "name": "USD1", "assetTransferMethod": "eip3009"},
+    })
+
+    assert terms["max_timeout_seconds"] == 300

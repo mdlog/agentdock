@@ -25,6 +25,9 @@ export const CategoryBrowse = ({ categories, selected, onSelect }: {
       {categories.map(cat => {
         const Icon = ICONS[cat.key] ?? Layers;
         const active = selected === cat.key;
+        // The registration count sets an expectation; this is the number that
+        // says whether a visitor can actually do anything in this category.
+        const hireable = (cat.ready ?? 0) + (cat.payable ?? 0);
         return (
           <button
             key={cat.key}
@@ -39,6 +42,11 @@ export const CategoryBrowse = ({ categories, selected, onSelect }: {
               <span className="category-count" data-testid={`category-count-${cat.key}`}>{cat.count.toLocaleString()}</span>
             </span>
             <p>{cat.blurb}</p>
+            <span className="category-ready" data-testid={`category-ready-${cat.key}`}>
+              {hireable > 0
+                ? <><b>{hireable}</b> ready to hire</>
+                : <em>None callable yet</em>}
+            </span>
           </button>
         );
       })}

@@ -58,6 +58,10 @@ async def startup() -> None:
     # Category browse is the marketplace's primary journey; index it with the
     # score sort so a filtered page never scans the collection.
     await db.scan_agents.create_index([("chain_id", 1), ("categories", 1), ("total_score", -1)])
+    # The default browse order. Without these the readiness sort scans the
+    # whole 134k collection on every page.
+    await db.scan_agents.create_index([("chain_id", 1), ("activatable", -1), ("total_score", -1)])
+    await db.scan_agents.create_index([("chain_id", 1), ("categories", 1), ("activatable", -1), ("total_score", -1)])
     await db.sync_runs.create_index([("source", 1), ("chain_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("feedback_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("agent_id", 1), ("submitted_at", -1)])
@@ -276,8 +280,15 @@ async def list_categories(network: str = "mainnet"):
     chain_id = 97 if network == "testnet" else 56
     items = []
     for cat in AGENT_CATEGORIES:
-        count = await db.scan_agents.count_documents({"chain_id": chain_id, "categories": cat["key"]})
-        items.append({"key": cat["key"], "label": cat["label"], "blurb": cat["blurb"], "count": count})
+        scope = {"chain_id": chain_id, "categories": cat["key"]}
+        count = await db.scan_agents.count_documents(scope)
+        # A registration count sets an expectation the category may not meet. The
+        # ready count is the one that predicts whether a visitor can do anything
+        # here, so both are published and the card leads with the honest one.
+        ready = await db.scan_agents.count_documents({**scope, "activatable": True})
+        payable = await db.b402_resources.count_documents({"categories": cat["key"]})
+        items.append({"key": cat["key"], "label": cat["label"], "blurb": cat["blurb"],
+                      "count": count, "ready": ready, "payable": payable})
     total_tagged = await db.scan_agents.count_documents({"chain_id": chain_id, "categories": {"$ne": []}})
     return {"categories": items, "total_categorized": total_tagged, "network": network, "chain_id": chain_id}
 
@@ -290,7 +301,7 @@ async def list_onchain_agents(
     category: str | None = None,
     x402: bool | None = None,
     verified: bool | None = None,
-    sort: str = "score",
+    sort: str = "ready",
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=60, ge=1, le=200),
 ):
@@ -311,13 +322,20 @@ async def list_onchain_agents(
         query["x402_supported"] = x402
     if verified is not None:
         query["is_verified"] = verified
-    sort_map = {"score": ("total_score", -1), "rank": ("rank", 1), "feedback": ("total_feedbacks", -1), "newest": ("created_at", -1)}
-    field, direction = sort_map.get(sort, sort_map["score"])
+    sort_map = {"score": [("total_score", -1)], "rank": [("rank", 1)],
+                "feedback": [("total_feedbacks", -1)], "newest": [("created_at", -1)]}
+    # Default ordering puts the agents a visitor can actually use first. Nothing
+    # is hidden and the totals are unchanged — a catalogue where 435 of 442
+    # probed endpoints are dead simply should not lead with them.
+    spec = [("activatable", -1), ("total_score", -1)] if sort == "ready" else sort_map.get(sort, sort_map["score"])
     # total is the number of matching rows, not the size of this page: the UI
     # needs it to render pagination over a catalogue it never receives whole.
     total = await db.scan_agents.count_documents(query)
-    items = await db.scan_agents.find(query, {"_id": 0, "raw_8004scan": 0}).sort(field, direction).skip(offset).limit(limit).to_list(limit)
-    return ScanAgentList(items=items, total=total, chain_id=chain_id, is_testnet=is_testnet, offset=offset, limit=limit)
+    # Published alongside the total so the ordering is legible rather than
+    # mysterious: the UI can say how many of these matches are actually usable.
+    ready_total = await db.scan_agents.count_documents({**query, "activatable": True})
+    items = await db.scan_agents.find(query, {"_id": 0, "raw_8004scan": 0}).sort(spec).skip(offset).limit(limit).to_list(limit)
+    return ScanAgentList(items=items, total=total, ready_total=ready_total, chain_id=chain_id, is_testnet=is_testnet, offset=offset, limit=limit)
 
 
 @api.get("/onchain/agents/{token_id}", response_model=ScanAgent, tags=["agents"])

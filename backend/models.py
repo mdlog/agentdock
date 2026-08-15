@@ -164,6 +164,8 @@ class ScanAgent(BaseModel):
 class ScanAgentList(BaseModel):
     items: list[ScanAgent]
     total: int
+    # How many of `total` have a verified, callable endpoint.
+    ready_total: int = 0
     source: str = "8004scan"
     chain_id: int = 56
     is_testnet: bool = False

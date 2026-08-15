@@ -181,20 +181,42 @@ def decode_settlement(response: httpx.Response) -> dict[str, Any] | None:
         return None
 
 
-async def fetch_challenge(url: str, method: str = "GET", params: dict | None = None) -> tuple[dict[str, Any] | None, httpx.Response]:
-    """Call the resource unpaid. A 200 means it is free; a 402 carries the terms."""
+def _request_args(method: str, params: dict | None) -> dict:
+    # A GET carries params in the query string; a POST carries them in the JSON
+    # body, which is what these merchants expect.
+    if method == "POST":
+        return {"json": params or {}}
+    return {"params": params}
+
+
+async def fetch_challenge(url: str, params: dict | None = None) -> tuple[dict[str, Any] | None, httpx.Response, str]:
+    """Call the resource unpaid. A 200 means it is free; a 402 carries the terms.
+
+    The b402 catalogue does not record which HTTP method an endpoint wants, and
+    ~half of them answer 404 to GET but 402 to POST (verified: all of Xona,
+    BortAgent). So GET is tried first, and a 404/405 falls back to POST. The
+    method that produced the challenge is returned so the paid replay uses the
+    same one.
+    """
     await _assert_public_https(url)
     async with httpx.AsyncClient(timeout=CHALLENGE_TIMEOUT, follow_redirects=False) as client:
-        response = await client.request(method, url, params=params, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    return _decode_challenge(response), response
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        response = await client.request("GET", url, headers=headers, **_request_args("GET", params))
+        method = "GET"
+        if response.status_code in (404, 405):
+            post = await client.request("POST", url, headers=headers, **_request_args("POST", params))
+            if post.status_code == 402 or post.status_code < 400:
+                response, method = post, "POST"
+    return _decode_challenge(response), response, method
 
 
 async def call_paid(url: str, header: str, method: str = "GET", params: dict | None = None) -> httpx.Response:
     await _assert_public_https(url)
     async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
         response = await client.request(
-            method, url, params=params,
+            method, url,
             headers={"User-Agent": USER_AGENT, "Accept": "application/json", "X-PAYMENT": header},
+            **_request_args(method, params),
         )
     if len(response.content) > MAX_RESPONSE_BYTES:
         raise B402Error("Agent response exceeded the size limit")

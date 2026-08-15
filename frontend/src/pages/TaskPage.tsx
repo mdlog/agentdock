@@ -16,7 +16,7 @@ export default function TaskPage() {
   const { taskId } = useParams();
   const { address } = useAccount();
   const chainId = useChainId();
-  const { switchChain } = useSwitchChain();
+  const { switchChain, switchChainAsync } = useSwitchChain();
   const { signTypedDataAsync } = useSignTypedData();
   const [task, setTask] = useState<Task | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -46,6 +46,13 @@ export default function TaskPage() {
     if (!address) return;
     setBusy("pay");
     try {
+      // The EIP-712 domain is bound to chain 56, and viem refuses to sign if the
+      // wallet is on any other chain (seen: "chainId 56 must match active 677").
+      // Force the switch first rather than relying on the page's chainId, which
+      // can lag the wallet or miss an unknown chain.
+      if (chainId !== DEFAULT_CHAIN.chainId) {
+        await switchChainAsync({ chainId: DEFAULT_CHAIN.chainId });
+      }
       const auth = await api.post(`/tasks/${taskId}/authorize`, { payer: address });
       const td = auth.data.typed_data as TypedData;
       const signature = await signTypedDataAsync({

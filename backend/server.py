@@ -535,7 +535,7 @@ async def _run_b402(task_id: str, task: dict) -> dict:
     if not resource:
         raise HTTPException(409, "This task is not attached to a runnable agent")
     try:
-        challenge, response = await b402.fetch_challenge(resource["resource"], params=_call_params(task, resource))
+        challenge, response, method = await b402.fetch_challenge(resource["resource"], params=_call_params(task, resource))
     except b402.B402Error as exc:
         await audit(task_id, "run.failed", f"Agent endpoint could not be reached safely: {exc}")
         raise HTTPException(502, str(exc)) from exc
@@ -559,7 +559,7 @@ async def _run_b402(task_id: str, task: dict) -> dict:
     except b402.B402Error as exc:
         raise HTTPException(502, str(exc)) from exc
 
-    await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "payment_terms": terms, "b402_accept": accept, "estimated_price_usd": terms["amount_tokens"], "updated_at": now_iso()}})
+    await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "payment_terms": terms, "b402_accept": accept, "b402_method": method, "estimated_price_usd": terms["amount_tokens"], "updated_at": now_iso()}})
     await audit(task_id, "payment.quoted", f"Agent requires {terms['amount_tokens']:g} {terms['asset_name']} on BNB Chain. Nothing is signed until you approve it in your wallet.")
     return {"state": "payment_pending", "paid": True, "terms": terms}
 
@@ -606,7 +606,7 @@ async def pay_task(task_id: str, payload: PayRequest):
 
     header = b402.build_payment_header(accept, payload.signature, authorization)
     try:
-        response = await b402.call_paid(resource["resource"], header, params=_call_params(task, resource))
+        response = await b402.call_paid(resource["resource"], header, method=task.get("b402_method", "GET"), params=_call_params(task, resource))
     except b402.B402Error as exc:
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "updated_at": now_iso()}})
         await audit(task_id, "run.failed", f"Paid call failed: {exc}")

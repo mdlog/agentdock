@@ -176,7 +176,10 @@ def test_onchain_agent_detail_404_for_missing(api_client: requests.Session, api_
 # Mongo uniqueness and sync persistence tests
 def test_mongo_scan_agents_unique_and_not_duplicated(mongo_db):
     docs = list(mongo_db.scan_agents.find({"chain_id": 56}, {"_id": 0, "chain_id": 1, "token_id": 1}))
-    assert len(docs) == 100
+    # Deliberately not a fixed count: this asserted 100 back when the sync only
+    # pulled the top page. What must hold at any catalogue size is that a
+    # repeated sync never duplicates an agent.
+    assert docs, "expected the mainnet catalogue to be synced"
     pairs = {(row["chain_id"], row["token_id"]) for row in docs}
     assert len(pairs) == len(docs)
 

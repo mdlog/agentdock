@@ -63,6 +63,15 @@ async def startup() -> None:
     await db.scan_agent_icons.create_index([("chain_id", 1), ("token_id", 1)], unique=True)
     if await db.agents.count_documents({}) == 0:
         await db.agents.insert_many(seed_agents())
+    # A process killed mid-sync leaves its row on "running", and every later
+    # trigger then 409s against a run that is not happening. Nothing can still
+    # be running at startup, so those rows are reclaimed rather than believed.
+    orphaned = await db.sync_runs.update_many(
+        {"status": "running"},
+        {"$set": {"status": "degraded", "error": "Interrupted before completion", "failed_at": now_iso()}},
+    )
+    if orphaned.modified_count:
+        print(f"Reclaimed {orphaned.modified_count} interrupted sync run(s)")
     app.state.scan_sync_task = __import__("asyncio").create_task(sync_bsc_mainnet(db))
     app.state.scan_testnet_task = __import__("asyncio").create_task(sync_bsc_testnet(db))
     app.state.b402_sync_task = __import__("asyncio").create_task(sync_b402_catalog())
@@ -188,29 +197,60 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
     marketplace browses — and paced under the 8004scan budget."""
     key = {"source": "endpoint_enrich", "chain_id": chain_id}
     await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": now_iso()}}, upsert=True)
+    # `endpoint_status` is the marker for a *probed* agent. Records from the
+    # earlier metadata-only pass have none, so they are re-examined rather than
+    # left carrying a claim nobody ever tested.
     cursor = db.scan_agents.find(
-        {"chain_id": chain_id, "categories": {"$ne": []}, "endpoint_checked": {"$ne": True}},
+        {"chain_id": chain_id, "categories": {"$ne": []}, "endpoint_status": {"$exists": False}},
         {"_id": 0, "id": 1, "chain_id": 1, "token_id": 1, "raw_8004scan_detail": 1},
     ).limit(limit)
     client = Scan8004Client()
     checked = activatable = 0
     try:
+        # 8004scan is rate limited, so details are read in a paced pass; the
+        # probes that follow hit hundreds of unrelated hosts and run concurrently.
+        resolved, unknown = [], 0
         for agent in await cursor.to_list(limit):
+            detail = None
             try:
                 detail = await client.agent_detail(chain_id, agent["token_id"])
             except Scan8004Error:
-                detail = agent.get("raw_8004scan_detail") or {}
-            ep = agent_client.pick_endpoint(detail)
-            update = {"endpoint_checked": True}
-            if ep:
-                update.update({"endpoint_kind": ep[0], "agent_endpoint": ep[1], "activatable": True})
-                activatable += 1
-            else:
-                update["activatable"] = False
+                detail = agent.get("raw_8004scan_detail")
+            if detail is None:
+                # 8004scan was unreachable and nothing is cached, so we do not
+                # know what this agent publishes. Recording "no endpoint" here
+                # would turn our own outage into a permanent verdict about
+                # somebody else's agent; leaving it unmarked lets a later pass
+                # pick it up.
+                unknown += 1
+                await asyncio.sleep(0.34)
+                continue
+            resolved.append((agent, agent_client.pick_endpoint(detail)))
+            await asyncio.sleep(0.34)
+
+        gate = asyncio.Semaphore(8)
+
+        async def verify(agent: dict, ep: tuple[str, str] | None) -> tuple[dict, dict]:
+            if not ep:
+                return agent, {"endpoint_status": "none", "endpoint_note": "No endpoint published onchain", "activatable": False}
+            async with gate:
+                status, note = await agent_client.probe_endpoint(*ep)
+            return agent, {"endpoint_kind": ep[0], "agent_endpoint": ep[1], "endpoint_status": status,
+                           "endpoint_note": note[:300], "activatable": status == "live"}
+
+        for completed in asyncio.as_completed([verify(a, e) for a, e in resolved]):
+            agent, update = await completed
+            update["endpoint_checked"] = True
+            update["endpoint_checked_at"] = now_iso()
             await db.scan_agents.update_one({"chain_id": chain_id, "token_id": agent["token_id"]}, {"$set": update})
             checked += 1
-            await asyncio.sleep(0.34)
-        result = {"status": "success", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked, "activatable": activatable, "completed_at": now_iso()}
+            activatable += 1 if update["activatable"] else 0
+            # Progress is published as it happens: a run that only reports at the
+            # end is indistinguishable from one that has hung.
+            if checked % 20 == 0:
+                await db.sync_runs.update_one(key, {"$set": {"checked": checked, "activatable": activatable, "total": len(resolved)}})
+        result = {"status": "success", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked,
+                  "activatable": activatable, "unknown": unknown, "completed_at": now_iso()}
     except Exception as exc:
         result = {"status": "degraded", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked, "activatable": activatable, "error": str(exc), "failed_at": now_iso()}
     await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
@@ -518,8 +558,19 @@ async def _run_onchain_agent(task: dict) -> dict:
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "updated_at": now_iso()}})
         await audit(task_id, "payment.required", "This agent requires payment through its own x402 endpoint; direct settlement is not yet wired.")
         raise HTTPException(409, "This agent charges through its own x402 endpoint, which AgentDock does not settle yet.")
+    except agent_client.AgentRejected as exc:
+        # The agent is reachable and simply refused. Saying "completed" here and
+        # showing its error text as the result is how a failure gets dressed up
+        # as an answer, so the refusal is recorded as exactly that.
+        await db.tasks.update_one({"id": task_id}, {"$set": {
+            "state": "failed", "result_preview": str(exc), "failure_reason": exc.reason, "updated_at": now_iso()}})
+        await audit(task_id, "run.rejected", f"The agent answered but did not do the work: {exc}")
+        detail = ("This agent needs its own credential, which AgentDock does not hold."
+                  if exc.reason == "auth" else str(exc))
+        raise HTTPException(502, detail) from exc
     except agent_client.AgentCallError as exc:
-        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "updated_at": now_iso()}})
+        await db.tasks.update_one({"id": task_id}, {"$set": {
+            "state": "failed", "result_preview": str(exc), "failure_reason": "unreachable", "updated_at": now_iso()}})
         await audit(task_id, "run.failed", f"Agent endpoint could not be reached safely: {exc}")
         raise HTTPException(502, str(exc)) from exc
     output = result.get("output") or ""
@@ -542,6 +593,12 @@ async def _run_b402(task_id: str, task: dict) -> dict:
 
     if response.status_code < 400 and not challenge:
         body = response.text[:4000]
+        # A redirect, a 204, or an empty body is not an answer. Accepting any
+        # sub-400 status here turned a moved endpoint into a completed task with
+        # nothing in it — and /run then refused to retry it.
+        if response.status_code >= 300 or not body.strip():
+            await audit(task_id, "run.failed", f"Agent returned HTTP {response.status_code} with neither payment terms nor content.")
+            raise HTTPException(502, f"Agent returned HTTP {response.status_code} with neither payment terms nor a result")
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "completed", "result": {"body": body}, "result_preview": body[:600], "estimated_price_usd": 0.0, "updated_at": now_iso()}})
         await audit(task_id, "run.completed", "Agent answered without requesting payment; no signature was requested.")
         return {"state": "completed", "paid": False, "result_preview": body[:600]}
@@ -607,22 +664,56 @@ async def pay_task(task_id: str, payload: PayRequest):
     header = b402.build_payment_header(accept, payload.signature, authorization)
     try:
         response = await b402.call_paid(resource["resource"], header, method=task.get("b402_method", "GET"), params=_call_params(task, resource))
+    except b402.PaymentNotSent as exc:
+        # The authorization was never presented, so it is still unspent. Returning
+        # the task to payment_pending is what makes the attempt retryable instead
+        # of stranding it in "paid" with nothing paid.
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "updated_at": now_iso()}})
+        await audit(task_id, "payment.not_sent", f"Nothing was charged: {exc}. The authorization is unused and can be resubmitted.")
+        raise HTTPException(502, f"{exc}. You can try again.") from exc
+    except b402.PaymentUncertain as exc:
+        # Sent but unanswered. Claiming either outcome would be a guess about the
+        # user's money, so it is flagged for a human instead.
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "manual_resolution", "updated_at": now_iso()}})
+        await audit(task_id, "payment.uncertain", f"{exc}. Check the payer address on BscScan before retrying.")
+        raise HTTPException(502, f"{exc}. Check your wallet on BscScan before retrying.") from exc
     except b402.B402Error as exc:
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "updated_at": now_iso()}})
         await audit(task_id, "run.failed", f"Paid call failed: {exc}")
         raise HTTPException(502, str(exc)) from exc
 
-    settlement = b402.decode_settlement(response)
+    try:
+        settlement = b402.decode_settlement(response)
+        settlement_error = None
+    except b402.B402Error as exc:
+        settlement, settlement_error = None, str(exc)
     if response.status_code >= 400:
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "settlement": settlement, "updated_at": now_iso()}})
         await audit(task_id, "payment.rejected", f"Agent rejected the payment with HTTP {response.status_code}.")
         raise HTTPException(402, {"message": "Agent rejected the payment", "status": response.status_code, "settlement": settlement, "body": response.text[:600]})
 
+    # A 2xx says the merchant served the content, not that the money moved: the
+    # facilitator reports that separately in the payment-response header. Reading
+    # only the status showed a green "settled" task with no transaction to check.
+    if settlement is not None and settlement.get("success") is False:
+        reason = settlement.get("errorReason") or "the facilitator did not settle the payment"
+        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "settlement": settlement, "updated_at": now_iso()}})
+        await audit(task_id, "payment.unsettled", f"The agent served a response but the payment did not settle: {reason}.")
+        raise HTTPException(402, f"The payment did not settle: {reason}")
+
     body = response.text[:4000]
-    tx_hash = (settlement or {}).get("transaction")
-    await db.tasks.update_one({"id": task_id}, {"$set": {"state": "completed", "result": {"body": body}, "result_preview": body[:600], "settlement": settlement, "tx_hash": tx_hash, "updated_at": now_iso()}})
-    await audit(task_id, "run.completed", "Agent executed and returned a result after settlement.")
-    return {"state": "completed", "result_preview": body[:600], "settlement": settlement, "tx_hash": tx_hash}
+    tx_hash = (settlement or {}).get("transaction") or None
+    settled = bool(settlement and settlement.get("success") is not False and tx_hash)
+    await db.tasks.update_one({"id": task_id}, {"$set": {
+        "state": "completed", "result": {"body": body}, "result_preview": body[:600],
+        "settlement": settlement, "settlement_verified": settled, "settlement_note": settlement_error,
+        "tx_hash": tx_hash, "updated_at": now_iso()}})
+    await audit(task_id, "run.completed", (
+        f"Agent executed and returned a result; the facilitator settled it in transaction {tx_hash}."
+        if settled else
+        "Agent executed and returned a result. It reported no settlement receipt, so the on-chain transfer is unconfirmed."))
+    return {"state": "completed", "result_preview": body[:600], "settlement": settlement,
+            "settlement_verified": settled, "tx_hash": tx_hash}
 
 
 @api.post("/tasks/{task_id}/quote", tags=["tasks"])

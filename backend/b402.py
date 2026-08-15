@@ -59,6 +59,14 @@ class PaymentRefused(B402Error):
     """The merchant's terms are outside what we are willing to present for signing."""
 
 
+class PaymentNotSent(B402Error):
+    """The paid request never left this process, so nothing can have been charged."""
+
+
+class PaymentUncertain(B402Error):
+    """The paid request went out but its outcome is unknown — it may have settled."""
+
+
 async def _assert_public_https(url: str) -> None:
     """Same SSRF posture as the icon proxy: endpoints come from third-party data."""
     parsed = urlparse(url)
@@ -177,8 +185,10 @@ def decode_settlement(response: httpx.Response) -> dict[str, Any] | None:
         return None
     try:
         return json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)))
-    except (ValueError, TypeError):
-        return None
+    except (ValueError, TypeError) as exc:
+        # Same posture as _decode_challenge: a merchant that sends a garbled
+        # receipt has told us something, and it is not "no receipt".
+        raise B402Error("Merchant sent an unreadable settlement receipt") from exc
 
 
 def _request_args(method: str, params: dict | None) -> dict:
@@ -211,13 +221,26 @@ async def fetch_challenge(url: str, params: dict | None = None) -> tuple[dict[st
 
 
 async def call_paid(url: str, header: str, method: str = "GET", params: dict | None = None) -> httpx.Response:
+    """Present the signed authorization and return the merchant's response.
+
+    Transport failures are translated rather than allowed to escape, and the two
+    kinds are kept apart because they mean opposite things to the payer: if the
+    connection was never established the authorization was never presented, so
+    nothing can have been charged and the call is safe to retry. Once the
+    request is on the wire, a timeout proves nothing either way.
+    """
     await _assert_public_https(url)
-    async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
-        response = await client.request(
-            method, url,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json", "X-PAYMENT": header},
-            **_request_args(method, params),
-        )
+    try:
+        async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
+            response = await client.request(
+                method, url,
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json", "X-PAYMENT": header},
+                **_request_args(method, params),
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.UnsupportedProtocol) as exc:
+        raise PaymentNotSent(f"The agent could not be reached ({type(exc).__name__}), so nothing was charged") from exc
+    except httpx.HTTPError as exc:
+        raise PaymentUncertain(f"The paid call was sent but its outcome is unknown ({type(exc).__name__})") from exc
     if len(response.content) > MAX_RESPONSE_BYTES:
         raise B402Error("Agent response exceeded the size limit")
     return response

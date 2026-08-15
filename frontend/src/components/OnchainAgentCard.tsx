@@ -8,6 +8,19 @@ import type { OnchainAgent } from "@/types";
 export const compactNumber = (value?: number) =>
   typeof value === "number" ? Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 
+// Why an agent cannot be activated, in the words of whatever its endpoint
+// actually did when we called it. Publishing a URL in on-chain metadata is a
+// claim, not a working service, so an unprobed agent says so rather than
+// borrowing the confidence of one we tested.
+export const UNAVAILABLE: Record<string, { label: string; note: string; hint: string }> = {
+  none: { label: "Identity only", note: "No endpoint published", hint: "This agent registered an identity but no callable endpoint." },
+  auth: { label: "Needs a credential", note: "Endpoint is private", hint: "The endpoint answered, but requires its own API key." },
+  payment: { label: "Charges separately", note: "Bills through its own x402", hint: "This agent settles through its own x402 endpoint, which AgentDock does not settle yet." },
+  dead: { label: "Endpoint offline", note: "Did not respond", hint: "The published endpoint could not be reached when we last checked." },
+  error: { label: "Endpoint faulty", note: "Answered incorrectly", hint: "The endpoint responded, but not in a way AgentDock could use." },
+};
+export const UNCHECKED = { label: "Endpoint unverified", note: "Not checked yet", hint: "AgentDock has not called this endpoint yet." };
+
 // Rendered by both the marketplace catalog and the Onchain explorer. Passing
 // `compare` switches on the marketplace-only row: 8004scan publishes no price,
 // so hiring stays visibly unavailable instead of silently missing.
@@ -19,6 +32,7 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
   const iconSrc = agent.has_source_icon ? `${backendUrl}/api/onchain/agents/${network}/${agent.token_id}/icon` : undefined;
   const scanBase = agent.is_testnet ? "https://testnet.bscscan.com" : "https://bscscan.com";
+  const state = (agent.endpoint_status && UNAVAILABLE[agent.endpoint_status]) || UNCHECKED;
 
   return (
     <article className="onchain-card" data-testid={`onchain-agent-${agent.token_id}`}>
@@ -47,9 +61,7 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
           <div>
             {agent.activatable
               ? <><strong data-testid={`onchain-status-${agent.token_id}`} className="activatable-tag">Live {agent.endpoint_kind?.toUpperCase()} endpoint</strong><span>Free to activate</span></>
-              : agent.endpoint_checked
-                ? <><strong data-testid={`onchain-price-${agent.token_id}`}>Identity only</strong><span>No callable endpoint</span></>
-                : <><strong data-testid={`onchain-price-${agent.token_id}`}>Endpoint unverified</strong><span>Not checked yet</span></>}
+              : <><strong data-testid={`onchain-price-${agent.token_id}`}>{state.label}</strong><span>{state.note}</span></>}
           </div>
           <div className="card-actions">
             <Button
@@ -63,7 +75,7 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
             </Button>
             {agent.activatable
               ? <Button data-testid={`activate-onchain-${agent.token_id}`} size="sm" asChild><Link to={`/hire/${agent.id}`}>Activate</Link></Button>
-              : <Button data-testid={`hire-onchain-${agent.token_id}`} size="sm" disabled title={agent.endpoint_checked ? "This agent publishes no callable endpoint, so it cannot be activated." : "This agent\u2019s endpoint has not been verified yet."}>Activate</Button>}
+              : <Button data-testid={`hire-onchain-${agent.token_id}`} size="sm" disabled title={state.hint}>Activate</Button>}
           </div>
         </div>
       )}

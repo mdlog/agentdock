@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { UNAVAILABLE, UNCHECKED } from "@/components/OnchainAgentCard";
 import { WalletButton } from "@/components/WalletButton";
 import { useAccount } from "wagmi";
 
@@ -22,6 +23,11 @@ type HireView = {
   endpointLabel: string;
   iconName: string;
   iconSrc?: string;
+  // Whether this agent can actually be run. An onchain identity is only
+  // runnable once a probe has reached its endpoint; asserting "Live endpoint"
+  // from the URL alone told the user something nobody had checked.
+  runnable: boolean;
+  blockedReason?: string;
 };
 
 export default function HirePage() {
@@ -40,7 +46,14 @@ export default function HirePage() {
       api.get(`/onchain/agents/${token}?network=mainnet`)
         .then(r => {
           const a = r.data as OnchainAgent;
-          setView({ paid: false, title: a.name, description: a.description, tags: a.supported_protocols, endpointLabel: `Live ${(a.endpoint_kind || "").toUpperCase()} endpoint`, iconName: `${a.chain_id}-${a.token_id}-${a.name}`, iconSrc: a.has_source_icon ? `${process.env.REACT_APP_BACKEND_URL}/api/onchain/agents/mainnet/${a.token_id}/icon` : undefined });
+          const unusable = a.activatable ? null : (a.endpoint_status && UNAVAILABLE[a.endpoint_status]) || UNCHECKED;
+          setView({
+            paid: false, title: a.name, description: a.description, tags: a.supported_protocols,
+            endpointLabel: unusable ? unusable.label : `Live ${(a.endpoint_kind || "").toUpperCase()} endpoint`,
+            iconName: `${a.chain_id}-${a.token_id}-${a.name}`,
+            iconSrc: a.has_source_icon ? `${process.env.REACT_APP_BACKEND_URL}/api/onchain/agents/mainnet/${a.token_id}/icon` : undefined,
+            runnable: !unusable, blockedReason: unusable?.hint,
+          });
         })
         .catch(e => setLoadError(messageFromError(e)));
     } else {
@@ -48,7 +61,7 @@ export default function HirePage() {
         .then(r => {
           const b = (r.data.items as B402Resource[]).find(i => i.id === resourceId);
           if (!b) { setLoadError("This service is no longer listed in the b402 catalog."); return; }
-          setView({ paid: true, title: b.host, description: b.description, tags: [b.type?.toUpperCase() || "HTTP", `x402 v${b.x402_version}`, "BNB Chain"], endpointLabel: b.resource, iconName: b.resource });
+          setView({ paid: true, title: b.host, description: b.description, tags: [b.type?.toUpperCase() || "HTTP", `x402 v${b.x402_version}`, "BNB Chain"], endpointLabel: b.resource, iconName: b.resource, runnable: true });
         })
         .catch(e => setLoadError(messageFromError(e)));
     }
@@ -75,11 +88,11 @@ export default function HirePage() {
     <section className="agent-profile-band">
       <AgentAvatar name={view.iconName} size={68} testId="hire-avatar" className="profile-avatar" src={view.iconSrc} />
       <div className="profile-title">
-        <div className="profile-name"><h1 data-testid="hire-heading">{view.title}</h1><span className="status-live">{view.paid ? "x402" : "activatable"}</span></div>
+        <div className="profile-name"><h1 data-testid="hire-heading">{view.title}</h1><span className={view.runnable ? "status-live" : "status-idle"}>{view.paid ? "x402" : view.runnable ? "activatable" : "not activatable"}</span></div>
         <p data-testid="hire-description">{view.description}</p>
         <div className="capability-row">{view.tags.map(t => <span key={t}>{t}</span>)}</div>
       </div>
-      <div className="profile-price"><span>Per call</span><strong data-testid="hire-price">{view.paid ? "Quoted at run" : "Free"}</strong></div>
+      <div className="profile-price"><span>Per call</span><strong data-testid="hire-price">{view.paid ? "Quoted at run" : view.runnable ? "Free" : "—"}</strong></div>
     </section>
 
     <div className="detail-layout">
@@ -87,7 +100,7 @@ export default function HirePage() {
         <section className="plain-section">
           <div className="section-title"><h2><Globe2 size={17} /> Endpoint</h2></div>
           <div className="identity-list">
-            <div><span>{view.paid ? "Resource" : "Live endpoint"}</span><strong data-testid="hire-endpoint">{view.endpointLabel}</strong></div>
+            <div><span>{view.paid ? "Resource" : view.runnable ? "Live endpoint" : "Endpoint"}</span><strong data-testid="hire-endpoint">{view.endpointLabel}</strong></div>
             <div><span>Settlement</span><strong>{view.paid ? "BNB Chain · 56" : "None — free to run"}</strong></div>
             <div><span>Source</span><strong>{view.paid ? "b402 Bazaar · BNB Chain" : "8004scan · BNB Chain"}</strong></div>
           </div>
@@ -96,10 +109,12 @@ export default function HirePage() {
         <section className="risk-band" data-testid="hire-safety-boundary">
           <LockKeyhole size={20} />
           <div>
-            <strong>{view.paid ? "You approve the payment, nobody else" : "You run it, nothing is charged"}</strong>
+            <strong>{view.paid ? "You approve the payment, nobody else" : view.runnable ? "You run it, nothing is charged" : "This agent cannot be run"}</strong>
             <p>{view.paid
               ? "AgentDock never holds a key. The merchant quotes its price when the task runs; the exact token, amount and recipient are shown before your wallet is asked to sign anything."
-              : "This agent exposes a live endpoint and does not charge. AgentDock calls it with your objective and returns the real result — no signature, no payment."}</p>
+              : view.runnable
+                ? "This agent exposes a live endpoint and does not charge. AgentDock calls it with your objective and returns the real result — no signature, no payment."
+                : view.blockedReason}</p>
           </div>
         </section>
       </div>
@@ -116,9 +131,10 @@ export default function HirePage() {
           <div><span>Permissions</span><strong>{view.paid ? "Single payment · no approval" : "Read-only call · no signature"}</strong></div>
         </div>
         {!address && view.paid && <WalletButton />}
-        <Button data-testid="create-hire-task-button" className="w-full" onClick={createTask} disabled={creating || objective.trim().length < 12}>
-          {creating ? "Creating task…" : view.paid ? "Create task & get price" : "Create task & run"}
+        <Button data-testid="create-hire-task-button" className="w-full" onClick={createTask} disabled={!view.runnable || creating || objective.trim().length < 12}>
+          {creating ? "Creating task…" : !view.runnable ? "Cannot be run" : view.paid ? "Create task & get price" : "Create task & run"}
         </Button>
+        {!view.runnable && <p className="payment-locked" data-testid="hire-blocked-reason"><AlertTriangle size={14} /> {view.blockedReason}</p>}
         {objective.trim().length > 0 && objective.trim().length < 12 && <p className="payment-locked" data-testid="hire-objective-warning"><AlertTriangle size={14} /> Describe the request in at least 12 characters.</p>}
       </aside>
     </div>

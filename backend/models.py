@@ -81,6 +81,7 @@ class TaskRecord(BaseModel):
     payment_terms: dict[str, Any] | None = None
     settlement: dict[str, Any] | None = None
     result_preview: str | None = None
+    failure_reason: str | None = None
     endpoint_kind: str | None = None
     quote_id: str | None = None
     quote_expires_at: str | None = None
@@ -141,6 +142,10 @@ class ScanAgent(BaseModel):
     categories: list[str] = Field(default_factory=list)
     activatable: bool = False
     endpoint_checked: bool = False
+    # live | auth | payment | dead | error | none — the verdict of a real probe,
+    # so the card can say why an agent cannot be activated instead of guessing.
+    endpoint_status: str | None = None
+    endpoint_note: str | None = None
     endpoint_kind: str | None = None
     x402_supported: bool
     is_verified: bool

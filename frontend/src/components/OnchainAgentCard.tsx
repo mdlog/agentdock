@@ -47,7 +47,9 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
           <div>
             {agent.activatable
               ? <><strong data-testid={`onchain-status-${agent.token_id}`} className="activatable-tag">Live {agent.endpoint_kind?.toUpperCase()} endpoint</strong><span>Free to activate</span></>
-              : <><strong data-testid={`onchain-price-${agent.token_id}`}>Identity only</strong><span>No callable endpoint</span></>}
+              : agent.endpoint_checked
+                ? <><strong data-testid={`onchain-price-${agent.token_id}`}>Identity only</strong><span>No callable endpoint</span></>
+                : <><strong data-testid={`onchain-price-${agent.token_id}`}>Endpoint unverified</strong><span>Not checked yet</span></>}
           </div>
           <div className="card-actions">
             <Button
@@ -61,7 +63,7 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
             </Button>
             {agent.activatable
               ? <Button data-testid={`activate-onchain-${agent.token_id}`} size="sm" asChild><Link to={`/hire/${agent.id}`}>Activate</Link></Button>
-              : <Button data-testid={`hire-onchain-${agent.token_id}`} size="sm" disabled title="This agent publishes no callable endpoint, so it cannot be activated yet.">Activate</Button>}
+              : <Button data-testid={`hire-onchain-${agent.token_id}`} size="sm" disabled title={agent.endpoint_checked ? "This agent publishes no callable endpoint, so it cannot be activated." : "This agent\u2019s endpoint has not been verified yet."}>Activate</Button>}
           </div>
         </div>
       )}

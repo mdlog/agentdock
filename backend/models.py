@@ -140,6 +140,7 @@ class ScanAgent(BaseModel):
     supported_protocols: list[str] = Field(default_factory=list)
     categories: list[str] = Field(default_factory=list)
     activatable: bool = False
+    endpoint_checked: bool = False
     endpoint_kind: str | None = None
     x402_supported: bool
     is_verified: bool

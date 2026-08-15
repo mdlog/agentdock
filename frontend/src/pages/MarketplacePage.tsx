@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Search, ShieldAlert, SlidersHorizontal, Sparkles, Zap } from "lucide-react";
+import { ArrowRight, Search, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import type { AgentCategory, B402Resource, OnchainAgent } from "@/types";
@@ -66,7 +66,7 @@ export default function MarketplacePage() {
 
   return <div>
     <section className="search-stage">
-      <div className="stage-copy"><span className="eyebrow"><Sparkles size={14} /> Agent marketplace on BNB Chain</span><h1 data-testid="marketplace-heading">Find the right agent for your next DeFi move.</h1><p data-testid="marketplace-subheading">Browse by what the agent does—rebalancing, grid trading, yield, or health-factor monitoring—on real BNB Chain identities. Your wallet stays under your control.</p></div>
+      <div className="stage-copy"><span className="eyebrow"><Sparkles size={14} /> Agent marketplace on BNB Chain</span><h1 data-testid="marketplace-heading">Find the right agent for your next DeFi move.</h1><p data-testid="marketplace-subheading">Real BNB Chain agents, organised by what they do. Pick a category, compare the evidence, and activate the one that fits.</p></div>
       <div className="search-box"><Search size={21} /><Input data-testid="marketplace-search-input" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search agents by name or what they do" /><kbd>⌘ K</kbd></div>
       <div className="trust-row" data-testid="marketplace-stats"><span><strong data-testid="stat-payable-count">{payable.length}</strong> hireable now</span><span><strong data-testid="stat-onchain-count">{total.toLocaleString()}</strong> onchain agents</span><span><strong>BNB</strong> Chain mainnet</span></div>
     </section>
@@ -75,16 +75,15 @@ export default function MarketplacePage() {
 
     {visiblePayable.length > 0 && <section className="catalog-section">
       <div className="catalog-heading"><div><p className="section-kicker"><Zap size={13} /> Pay per call · b402 Bazaar</p><h2 data-testid="payable-heading">{activeCat ? `Hireable ${activeCat.label} agents` : "Agents you can hire right now"}</h2></div><span data-testid="payable-result-count">{visiblePayable.length} services</span></div>
-      <div className="payable-notice" data-testid="payable-notice"><ShieldAlert size={18} /><div><strong>Paying is permissionless — you sign, AgentDock never holds a key.</strong><p>Each merchant quotes its own price when the task runs. The exact token, amount and recipient are shown before your wallet is asked to sign, and settlement happens on BNB Chain.</p></div></div>
+      <p className="payable-notice" data-testid="payable-notice"><ShieldAlert size={14} /><span><strong>You sign with your own wallet.</strong> Price, token and recipient are shown before anything is signed — settlement on BNB Chain.</span></p>
       <div className="onchain-grid" data-testid="payable-grid">{visiblePayable.map(r => <B402ResourceCard key={r.id} resource={r} />)}</div>
     </section>}
 
     <section className="catalog-section">
       <div className="catalog-heading"><div><p className="section-kicker">Onchain identities · 8004scan</p><h2 data-testid="catalog-heading">{activeCat ? `${activeCat.label} agents` : "All onchain agents on BNB Chain"}</h2><p className="section-note" data-testid="onchain-hire-note">{activeCat ? activeCat.blurb + " Discovered from 8004scan by each agent's own onchain metadata." : "Discovered from 8004scan. Pick a category above to narrow to agents that do a specific job."}</p></div><span data-testid="agent-result-count">{total.toLocaleString()} matches</span></div>
-      <div className="filter-bar" data-testid="agent-filter-bar"><SlidersHorizontal size={16} />
+      <div className="filter-bar" data-testid="agent-filter-bar">
         <Select value={protocol} onValueChange={v => { setProtocol(v); setOffset(0); }}><SelectTrigger data-testid="protocol-filter"><SelectValue placeholder="Protocol" /></SelectTrigger><SelectContent><SelectItem data-testid="protocol-all" value="all">All protocols</SelectItem>{protocols.map(p => <SelectItem data-testid={`protocol-${p.toLowerCase()}`} value={p} key={p}>{p}</SelectItem>)}</SelectContent></Select>
         <Select value={sort} onValueChange={v => { setSort(v); setOffset(0); }}><SelectTrigger data-testid="sort-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem data-testid="sort-score" value="score">8004scan score</SelectItem><SelectItem data-testid="sort-rank" value="rank">Network rank</SelectItem><SelectItem data-testid="sort-feedback" value="feedback">Feedback volume</SelectItem></SelectContent></Select>
-        <span />
         {selected.length > 0 && <Button data-testid="open-comparison-button" asChild className="compare-floating"><Link to="/compare">Compare {selected.length}/3 <ArrowRight size={15} /></Link></Button>}
       </div>
       {loading

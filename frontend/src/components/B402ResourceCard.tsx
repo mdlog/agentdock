@@ -1,4 +1,4 @@
-import { ArrowUpRight, Globe2, Zap } from "lucide-react";
+import { ArrowUpRight, ExternalLink, Globe2, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,7 +42,7 @@ export const B402ResourceCard = ({ resource }: { resource: B402Resource }) => (
     <div className="onchain-footer">
       <span><Globe2 size={12} />{resource.source_label}</span>
       <div>
-        <a href={resource.resource} target="_blank" rel="noreferrer" data-testid={`b402-endpoint-${resource.id}`}>Endpoint</a>
+        <a href={resource.resource} target="_blank" rel="noreferrer" data-testid={`b402-endpoint-${resource.id}`} aria-label="Open the raw endpoint"><ExternalLink size={14} /></a>
       </div>
     </div>
   </article>

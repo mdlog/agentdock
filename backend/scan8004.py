@@ -11,6 +11,12 @@ SOURCE = "8004scan"
 MAINNET_CHAIN_ID = 56
 TESTNET_CHAIN_ID = 97
 
+# Identify the client honestly. Without a User-Agent, httpx sends its own default
+# and Cloudflare eventually answers 403 (code 1010) on signature alone — it let
+# 47,600 rows through before escalating mid-run. A descriptive agent string is
+# accepted; nothing here pretends to be a browser.
+USER_AGENT = "AgentDock/1.0 (+https://github.com/mdlog/agentdock)"
+
 
 class Scan8004Error(RuntimeError):
     pass
@@ -39,7 +45,7 @@ class Scan8004Client:
                     response = await http.get(
                         f"{base or self.base_url}{path}",
                         params=params,
-                        headers={"X-API-Key": self.api_key, "Accept": "application/json"},
+                        headers={"X-API-Key": self.api_key, "Accept": "application/json", "User-Agent": USER_AGENT},
                     )
                 if response.status_code == 429:
                     if attempt == 2:
@@ -314,7 +320,17 @@ async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
     try:
         while True:
             offsets = [offset + i * page_size for i in range(concurrency)]
-            pages = await asyncio.gather(*(client.list_all_agents(chain_id, o, page_size) for o in offsets))
+            # Retry the batch rather than abandoning the run. Over tens of
+            # minutes the upstream will drop a request or two; a single failure
+            # used to end the whole sync and forfeit the remaining catalogue.
+            for attempt in range(4):
+                try:
+                    pages = await asyncio.gather(*(client.list_all_agents(chain_id, o, page_size) for o in offsets))
+                    break
+                except Scan8004Error:
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(min(2 ** attempt, 8) + random.random())
             rows = [row for page, total in pages for row in page]
             for _, total in pages:
                 if total is not None:

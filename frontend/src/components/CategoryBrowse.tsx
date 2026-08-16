@@ -36,17 +36,17 @@ export const CategoryBrowse = ({ categories, selected, onSelect }: {
             aria-pressed={active}
             onClick={() => onSelect(active ? null : cat.key)}
           >
-            <span className="category-top">
-              <span className="category-icon"><Icon size={15} /></span>
-              <strong>{cat.label}</strong>
-              <span className="category-count" data-testid={`category-count-${cat.key}`}>{cat.count.toLocaleString()}</span>
-            </span>
-            <p>{cat.blurb}</p>
+            <span className="category-icon"><Icon size={14} /></span>
+            <strong>{cat.label}</strong>
+            {/* The count that predicts whether a visitor can do anything here.
+                The registration total and the blurb both reappear the moment a
+                category is picked, in the section heading below. */}
             <span className="category-ready" data-testid={`category-ready-${cat.key}`}>
               {hireable > 0
-                ? <><b>{hireable}</b> ready to hire</>
-                : <em>None callable yet</em>}
+                ? <b>{hireable}</b>
+                : <em>0</em>}
             </span>
+            <span className="category-count" data-testid={`category-count-${cat.key}`}>/ {cat.count.toLocaleString()}</span>
           </button>
         );
       })}

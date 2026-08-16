@@ -84,3 +84,38 @@ def test_caller_is_identified_by_the_cloudflare_header():
 
 def test_caller_falls_back_to_the_socket_for_direct_connections():
     assert guards.client_key(_request({})) == "10.0.0.1"
+
+
+# --- endpoint verdicts must not be allowed to go stale -----------------------
+
+def test_stale_verdicts_are_selected_for_reprobing(monkeypatch):
+    """A verdict is a claim about the past. The selector must pick up anything
+    unprobed, anything never stamped, and anything older than the TTL — or the
+    hireable pool can only shrink between now and judging."""
+    import server
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=server.ENDPOINT_VERDICT_TTL_HOURS)).isoformat()
+    fresh = datetime.now(timezone.utc).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(hours=server.ENDPOINT_VERDICT_TTL_HOURS + 1)).isoformat()
+
+    def selected(doc):
+        clauses = [
+            "endpoint_status" not in doc,
+            doc.get("endpoint_checked_at") is not None and doc["endpoint_checked_at"] < cutoff,
+            "endpoint_checked_at" not in doc,
+        ]
+        return any(clauses)
+
+    assert selected({}) is True                                            # never probed
+    assert selected({"endpoint_status": "live"}) is True                   # probed before stamps existed
+    assert selected({"endpoint_status": "live", "endpoint_checked_at": old}) is True
+    assert selected({"endpoint_status": "live", "endpoint_checked_at": fresh}) is False
+
+
+def test_reprobe_ttl_is_shorter_than_a_judging_window():
+    """Whatever the value, it must be short enough that a dead endpoint is not
+    still advertised days later."""
+    import server
+
+    assert 1 <= server.ENDPOINT_VERDICT_TTL_HOURS <= 24

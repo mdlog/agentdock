@@ -14,8 +14,7 @@ import agent_client
 import b402
 from guards import client_key, require_operator, run_limiter, task_limiter
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
-from models import Agent, AgentList, AuditEvent, AuthorizeRequest, CompareRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
-from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
+from models import AuditEvent, AuthorizeRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks, sync_new_agents
 from icon_proxy import get_agent_icon
 
@@ -34,6 +33,16 @@ artifacts = ArtifactStore()
 # BSC networks independently and is not affected by this value.
 CHAIN_ID = int(os.environ.get("BSC_CHAIN_ID", "56"))
 
+# Upstream failures are reported as 4xx, not 5xx. This is not cosmetic: the
+# Cloudflare edge replaces any 5xx from the origin with its own error page,
+# which carries no CORS header and no body — so the browser sees a network
+# failure and every honest explanation ("this agent needs its own credential",
+# "check your wallet on BscScan before retrying") is erased before the user
+# reads it. 424 is also the truthful code: the request was fine, something we
+# depend on was not.
+UPSTREAM_FAILED = 424       # Failed Dependency
+UPSTREAM_UNAVAILABLE = 409  # Conflict: a dependency is not configured
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -45,7 +54,6 @@ async def audit(task_id: str, event: str, detail: str) -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    await db.agents.create_index("id", unique=True)
     await db.tasks.create_index("id", unique=True)
     await db.audit_events.create_index([("task_id", 1), ("created_at", 1)])
     await db.payments.create_index("tx_hash", unique=True, sparse=True)
@@ -67,8 +75,6 @@ async def startup() -> None:
     await db.scan_feedbacks.create_index([("chain_id", 1), ("feedback_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("agent_id", 1), ("submitted_at", -1)])
     await db.scan_agent_icons.create_index([("chain_id", 1), ("token_id", 1)], unique=True)
-    if await db.agents.count_documents({}) == 0:
-        await db.agents.insert_many(seed_agents())
     # A process killed mid-sync leaves its row on "running", and every later
     # trigger then 409s against a run that is not happening. Nothing can still
     # be running at startup, so those rows are reclaimed rather than believed.
@@ -83,6 +89,7 @@ async def startup() -> None:
     app.state.b402_sync_task = __import__("asyncio").create_task(sync_b402_catalog())
     app.state.scan_mainnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 56, False))
     app.state.head_sync_task = __import__("asyncio").create_task(_head_sync_loop())
+    app.state.enrich_loop_task = __import__("asyncio").create_task(_enrich_loop())
     app.state.scan_testnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 97, True))
 
 
@@ -99,6 +106,27 @@ async def _head_sync_loop(interval_seconds: int = 600) -> None:
                 print(f"Head sync: +{result['new_agents']} new agents")
         except Exception as exc:  # never let the loop die on a bad pass
             print(f"Head sync pass failed: {exc}")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _enrich_loop(interval_seconds: int = 3600) -> None:
+    """Keep endpoint verdicts current for as long as the app is up.
+
+    Runs hourly and re-probes whatever has gone stale, so the hireable pool
+    tracks reality in both directions: an agent whose host dies stops offering a
+    button that fails, and an operator who finally deploys their service becomes
+    hireable without anyone intervening.
+    """
+    while True:
+        try:
+            key = {"source": "endpoint_enrich", "chain_id": CHAIN_ID}
+            running = await db.sync_runs.find_one(key)
+            if not running or running.get("status") != "running":
+                result = await enrich_endpoints(CHAIN_ID)
+                if result.get("checked"):
+                    print(f"Endpoint re-probe: {result['checked']} checked, {result['activatable']} live")
+        except Exception as exc:  # a bad pass must not end the loop
+            print(f"Endpoint re-probe failed: {exc}")
         await asyncio.sleep(interval_seconds)
 
 
@@ -214,6 +242,13 @@ async def scan_status(network: str = "mainnet"):
     return {**result, "feedback_sample": feedback_count, "stored_agents": stored, "full_sync": full or {"status": "never_run"}}
 
 
+# How long a verdict is trusted before it is checked again. Endpoints come and
+# go: a probe run once is a claim about the past, and over a judging window
+# weeks away an unrefreshed pool can only shrink as hosts disappear — while an
+# operator who deploys their service never becomes visible.
+ENDPOINT_VERDICT_TTL_HOURS = 12
+
+
 async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
     """Resolve callable endpoints for categorized agents and flag the activatable
     ones. Bounded to the categorized set (a few hundred) — those are what the
@@ -223,8 +258,12 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
     # `endpoint_status` is the marker for a *probed* agent. Records from the
     # earlier metadata-only pass have none, so they are re-examined rather than
     # left carrying a claim nobody ever tested.
+    stale_before = (datetime.now(timezone.utc) - timedelta(hours=ENDPOINT_VERDICT_TTL_HOURS)).isoformat()
     cursor = db.scan_agents.find(
-        {"chain_id": chain_id, "categories": {"$ne": []}, "endpoint_status": {"$exists": False}},
+        {"chain_id": chain_id, "categories": {"$ne": []},
+         "$or": [{"endpoint_status": {"$exists": False}},
+                 {"endpoint_checked_at": {"$lt": stale_before}},
+                 {"endpoint_checked_at": {"$exists": False}}]},
         {"_id": 0, "id": 1, "chain_id": 1, "token_id": 1, "raw_8004scan_detail": 1},
     ).limit(limit)
     client = Scan8004Client()
@@ -464,57 +503,6 @@ async def onchain_agent_detail(network: str, token_id: int):
     return {"agent": detail_projection(raw), "feedbacks": feedbacks, "source": source, "fetched_at": now_iso()}
 
 
-@api.get("/agents", response_model=AgentList, tags=["agents"])
-async def list_agents(
-    search: str = "",
-    category: str | None = None,
-    status: str | None = None,
-    max_price: float | None = Query(default=None, ge=0),
-    sort: str = "reputation",
-):
-    query: dict = {}
-    if search:
-        query["$or"] = [
-            {"name": {"$regex": re.escape(search), "$options": "i"}},
-            {"tagline": {"$regex": re.escape(search), "$options": "i"}},
-            {"capabilities": {"$regex": re.escape(search), "$options": "i"}},
-        ]
-    if category:
-        query["category"] = category
-    if status:
-        query["status"] = status
-    if max_price is not None:
-        query["price_usd"] = {"$lte": max_price}
-    sort_map = {"reputation": ("metrics.reputation_score", -1), "price_low": ("price_usd", 1), "latency": ("metrics.latency_sec", 1), "volume": ("metrics.task_volume", -1)}
-    field, direction = sort_map.get(sort, sort_map["reputation"])
-    items = await db.agents.find(query, {"_id": 0}).sort(field, direction).to_list(100)
-    return AgentList(items=items, total=len(items), categories=CATEGORIES)
-
-
-@api.get("/agents/{agent_id}", response_model=Agent, tags=["agents"])
-async def get_agent(agent_id: str):
-    agent = await db.agents.find_one({"id": agent_id}, {"_id": 0})
-    if not agent:
-        raise HTTPException(404, "Agent not found")
-    return agent
-
-
-@api.post("/agents/compare", response_model=list[Agent], tags=["agents"])
-async def compare_agents(payload: CompareRequest):
-    if len(set(payload.agent_ids)) != len(payload.agent_ids):
-        raise HTTPException(400, "Choose distinct agents")
-    agents = await db.agents.find({"id": {"$in": payload.agent_ids}}, {"_id": 0}).to_list(3)
-    ordered = sorted(agents, key=lambda item: payload.agent_ids.index(item["id"]))
-    if len(ordered) != len(payload.agent_ids):
-        raise HTTPException(404, "One or more agents were not found")
-    return ordered
-
-
-@api.get("/pancakeswap/pools", tags=["pancakeswap"])
-async def pancake_pools():
-    return {"items": PANCAKE_POOLS, "mode": "reference_snapshot", "read_only": True}
-
-
 BLOCKED_TERMS = ("private key", "seed phrase", "recovery phrase", "approve token", "unlimited approval", "execute swap", "sign for me")
 
 
@@ -553,12 +541,7 @@ async def create_task(payload: TaskCreate, request: Request):
         # agent at run time, exactly as the probe resolved it.
         extra = {"agent_endpoint": endpoint, "endpoint_kind": kind, "agent_token_id": agent["token_id"]}
     else:
-        agent = await db.agents.find_one({"id": payload.agent_id}, {"_id": 0})
-        if not agent:
-            raise HTTPException(404, "Agent not found")
-        if agent["status"] != "active":
-            raise HTTPException(409, "Agent is currently offline")
-        agent_id, agent_name, price = agent["id"], agent["name"], agent["price_usd"]
+        raise HTTPException(404, "No such agent. Hire an onchain agent (bsc-...) or a b402 service.")
     task = {"id": task_id, "agent_id": agent_id, "agent_name": agent_name, "objective": payload.objective, "constraints": payload.constraints, "wallet_address": payload.wallet_address, "state": "created", "estimated_price_usd": price, "payment_terms": None, "settlement": None, "result_preview": None, "quote_id": None, "quote_expires_at": None, "tx_hash": None, "result": None, "created_at": stamp, "updated_at": stamp, **extra}
     await db.tasks.insert_one(task.copy())
     await audit(task_id, "task.created", "Research task accepted; no payment or agent execution has occurred.")
@@ -636,12 +619,12 @@ async def _run_onchain_agent(task: dict) -> dict:
         await audit(task_id, "run.rejected", f"The agent answered but did not do the work: {exc}")
         detail = ("This agent needs its own credential, which AgentDock does not hold."
                   if exc.reason == "auth" else str(exc))
-        raise HTTPException(502, detail) from exc
+        raise HTTPException(UPSTREAM_FAILED, detail) from exc
     except agent_client.AgentCallError as exc:
         await db.tasks.update_one({"id": task_id}, {"$set": {
             "state": "failed", "result_preview": str(exc), "failure_reason": "unreachable", "updated_at": now_iso()}})
         await audit(task_id, "run.failed", f"Agent endpoint could not be reached safely: {exc}")
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(UPSTREAM_FAILED, str(exc)) from exc
     output = result.get("output") or ""
     await db.tasks.update_one({"id": task_id}, {"$set": {
         "state": "completed", "result": result, "result_preview": output[:1200],
@@ -658,7 +641,7 @@ async def _run_b402(task_id: str, task: dict) -> dict:
         challenge, response, method = await b402.fetch_challenge(resource["resource"], params=_call_params(task, resource))
     except b402.B402Error as exc:
         await audit(task_id, "run.failed", f"Agent endpoint could not be reached safely: {exc}")
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(UPSTREAM_FAILED, str(exc)) from exc
 
     if response.status_code < 400 and not challenge:
         body = response.text[:4000]
@@ -667,14 +650,14 @@ async def _run_b402(task_id: str, task: dict) -> dict:
         # nothing in it — and /run then refused to retry it.
         if response.status_code >= 300 or not body.strip():
             await audit(task_id, "run.failed", f"Agent returned HTTP {response.status_code} with neither payment terms nor content.")
-            raise HTTPException(502, f"Agent returned HTTP {response.status_code} with neither payment terms nor a result")
+            raise HTTPException(UPSTREAM_FAILED, f"Agent returned HTTP {response.status_code} with neither payment terms nor a result")
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "completed", "result": {"body": body}, "result_preview": body[:600], "estimated_price_usd": 0.0, "updated_at": now_iso()}})
         await audit(task_id, "run.completed", "Agent answered without requesting payment; no signature was requested.")
         return {"state": "completed", "paid": False, "result_preview": body[:600]}
 
     if not challenge:
         await audit(task_id, "run.failed", f"Agent returned HTTP {response.status_code} without payment terms.")
-        raise HTTPException(502, f"Agent returned HTTP {response.status_code} without payment terms")
+        raise HTTPException(UPSTREAM_FAILED, f"Agent returned HTTP {response.status_code} without payment terms")
 
     try:
         accept = b402.select_bsc_eip3009(challenge)
@@ -683,7 +666,7 @@ async def _run_b402(task_id: str, task: dict) -> dict:
         await audit(task_id, "payment.refused", str(exc))
         raise HTTPException(409, str(exc)) from exc
     except b402.B402Error as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(UPSTREAM_FAILED, str(exc)) from exc
 
     await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "payment_terms": terms, "b402_accept": accept, "b402_method": method, "estimated_price_usd": terms["amount_tokens"], "updated_at": now_iso()}})
     await audit(task_id, "payment.quoted", f"Agent requires {terms['amount_tokens']:g} {terms['asset_name']} on BNB Chain. Nothing is signed until you approve it in your wallet.")
@@ -739,17 +722,17 @@ async def pay_task(task_id: str, payload: PayRequest):
         # of stranding it in "paid" with nothing paid.
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "updated_at": now_iso()}})
         await audit(task_id, "payment.not_sent", f"Nothing was charged: {exc}. The authorization is unused and can be resubmitted.")
-        raise HTTPException(502, f"{exc}. You can try again.") from exc
+        raise HTTPException(UPSTREAM_FAILED, f"{exc}. You can try again.") from exc
     except b402.PaymentUncertain as exc:
         # Sent but unanswered. Claiming either outcome would be a guess about the
         # user's money, so it is flagged for a human instead.
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "manual_resolution", "updated_at": now_iso()}})
         await audit(task_id, "payment.uncertain", f"{exc}. Check the payer address on BscScan before retrying.")
-        raise HTTPException(502, f"{exc}. Check your wallet on BscScan before retrying.") from exc
+        raise HTTPException(UPSTREAM_FAILED, f"{exc}. Check your wallet on BscScan before retrying.") from exc
     except b402.B402Error as exc:
         await db.tasks.update_one({"id": task_id}, {"$set": {"state": "failed", "updated_at": now_iso()}})
         await audit(task_id, "run.failed", f"Paid call failed: {exc}")
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(UPSTREAM_FAILED, str(exc)) from exc
 
     try:
         settlement = b402.decode_settlement(response)
@@ -794,13 +777,13 @@ async def create_quote(task_id: str, payload: QuoteRequest):
         raise HTTPException(422, "A valid EVM payer address is required")
     if not b402_merchant.ready:
         await audit(task_id, "quote.blocked", "Binance B402 partner configuration is not active; no payment was requested.")
-        raise HTTPException(503, "Binance B402 is not configured. Payment remains disabled and no wallet signature is requested.")
+        raise HTTPException(UPSTREAM_UNAVAILABLE, "Binance B402 is not configured. Payment remains disabled and no wallet signature is requested.")
     quote_id = str(uuid.uuid4())
     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
     try:
         requirements = await b402_merchant.supported()
     except B402Unavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise HTTPException(UPSTREAM_UNAVAILABLE, str(exc)) from exc
     await db.tasks.update_one({"id": task_id, "state": "created"}, {"$set": {"quote_id": quote_id, "quote_expires_at": expires_at, "wallet_address": payload.payer, "updated_at": now_iso()}})
     return {"quote_id": quote_id, "chain_id": CHAIN_ID, "expires_at": expires_at, "amount_usd": task["estimated_price_usd"], "payment_requirements": requirements}
 

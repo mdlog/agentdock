@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowLeft, Globe2, Loader2, LockKeyhole, Zap } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { api, messageFromError } from "@/lib/api";
+import { AGENT_CALL, api, messageFromError } from "@/lib/api";
 import type { B402Resource, OnchainAgent } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -71,7 +71,7 @@ export default function HirePage() {
   const createTask = async () => {
     setCreating(true);
     try {
-      const r = await api.post("/tasks", { agent_id: resourceId, objective, constraints: "", wallet_address: address ?? null });
+      const r = await api.post("/tasks", { agent_id: resourceId, objective, constraints: "", wallet_address: address ?? null }, AGENT_CALL);
       navigate(`/tasks/${r.data.id}`);
     } catch (e) {
       toast.error(messageFromError(e));

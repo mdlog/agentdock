@@ -6,49 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field
 TaskState = Literal["created", "payment_pending", "paid", "running", "completed", "failed", "refunded", "manual_resolution"]
 
 
-class MetricSet(BaseModel):
-    success_rate: float
-    uptime_pct: float
-    latency_sec: int
-    task_volume: int
-    recency_score: float
-    feedback_score: float
-    reputation_score: float
 
 
-class OnchainIdentity(BaseModel):
-    chain_id: int = 56
-    registry: str
-    agent_id: int
-    metadata_verified: bool
-    endpoint_verified: bool
-    source: str = "ERC-8004 registration"
 
-
-class Agent(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    name: str
-    tagline: str
-    description: str
-    category: str
-    capabilities: list[str]
-    price_usd: float
-    status: Literal["active", "offline"]
-    metrics: MetricSet
-    identity: OnchainIdentity
-    output_schema: list[str]
-    updated_at: str
-
-
-class AgentList(BaseModel):
-    items: list[Agent]
-    total: int
-    categories: list[str]
-
-
-class CompareRequest(BaseModel):
-    agent_ids: list[str] = Field(min_length=2, max_length=3)
 
 
 class TaskCreate(BaseModel):

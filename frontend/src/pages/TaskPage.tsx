@@ -3,7 +3,7 @@ import { AlertTriangle, Clock3, ExternalLink, FileSearch, Loader2, PenLine, Play
 import { Link, useParams } from "react-router-dom";
 import { useAccount, useChainId, useSignTypedData, useSwitchChain } from "wagmi";
 import { toast } from "sonner";
-import { api, messageFromError } from "@/lib/api";
+import { AGENT_CALL, api, messageFromError, PAID_CALL } from "@/lib/api";
 import type { AuditEvent, Task, TypedData } from "@/types";
 import { Button } from "@/components/ui/button";
 import { WalletButton } from "@/components/WalletButton";
@@ -40,10 +40,15 @@ export default function TaskPage() {
   const runTask = async () => {
     setBusy("run");
     try {
-      const r = await api.post(`/tasks/${taskId}/run`);
+      const r = await api.post(`/tasks/${taskId}/run`, undefined, AGENT_CALL);
       toast.success(r.data.paid ? "Merchant quoted a price" : "Agent answered without charging");
       await load();
-    } catch (e) { toast.error(messageFromError(e)); } finally { setBusy(""); }
+    } catch (e) {
+      toast.error(messageFromError(e));
+      // The server has already recorded why. Reload so the rail, the status
+      // chip and the audit trail show it instead of staying frozen on step 1.
+      await load().catch(() => {});
+    } finally { setBusy(""); }
   };
 
   // Authorize and sign are deliberately one action: the merchant's window is
@@ -75,7 +80,7 @@ export default function TaskPage() {
           nonce: td.message.nonce as `0x${string}`,
         } as any,
       });
-      await api.post(`/tasks/${taskId}/pay`, { signature });
+      await api.post(`/tasks/${taskId}/pay`, { signature }, PAID_CALL);
       toast.success("Payment settled and agent executed");
       await load();
     } catch (e: any) {

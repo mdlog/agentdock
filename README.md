@@ -87,6 +87,7 @@ Browser ─── wagmi/viem ──▶ user's wallet (signs; keys never leave it
 | `deploy/` | systemd units and their runbook. |
 | `scripts/serve_frontend.py` | Static server: SPA routing, cache headers. |
 | `docs/` | Upstream bug reports filed from this work. |
+| `tests/` | Playwright end-to-end specs. |
 
 ## Running it
 
@@ -117,10 +118,11 @@ so they are closed by default.
 ## Tests
 
 ```bash
-cd backend && ./.venv/bin/python -m pytest tests/ -q
+cd backend && ./.venv/bin/pip install -r requirements-dev.txt
+./.venv/bin/python -m pytest tests/ -q
 ```
 
-81 unit tests cover the parts where being wrong is expensive: how an agent's
+83 unit tests cover the parts where being wrong is expensive: how an agent's
 refusal is told from an answer, what a payment outcome means when the call
 fails mid-flight, and the public API's guards. The suite additionally holds
 integration tests that skip unless a deployed API is configured.

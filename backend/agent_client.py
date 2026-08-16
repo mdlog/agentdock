@@ -420,15 +420,26 @@ async def call_a2a(url: str, objective: str, token_id: int | None = None) -> dic
         return {"transport": "a2a", "output": text[:4000]}
 
 
-async def probe_endpoint(kind: str, url: str, token_id: int | None = None) -> tuple[str, str]:
-    """Bounded wrapper around _probe: a probe that hangs is a dead endpoint."""
+async def probe_endpoint(kind: str, url: str, token_id: int | None = None) -> tuple[str, str, str]:
+    """Bounded wrapper around _probe: a probe that hangs is a dead endpoint.
+
+    Returns (status, note, reached) where `reached` is the URL we actually
+    requested. That is rarely the string published on chain — an `{agentId}`
+    template is filled in, and an agent card is followed to whatever endpoint it
+    names — so a page showing only the declared URL cannot explain its own
+    verdict. The trace travels in a dict rather than _probe's return value so a
+    timeout or an exception still reports how far we got.
+    """
+    trace = {"url": substitute_agent_id(url, token_id)}
     try:
-        return await asyncio.wait_for(_probe(kind, url, token_id), timeout=PROBE_WALL_CLOCK)
+        status, note = await asyncio.wait_for(_probe(kind, url, token_id, trace), timeout=PROBE_WALL_CLOCK)
     except (asyncio.TimeoutError, TimeoutError):
-        return "dead", f"Endpoint did not answer within {int(PROBE_WALL_CLOCK)}s"
+        status, note = "dead", f"Endpoint did not answer within {int(PROBE_WALL_CLOCK)}s"
+    return status, note, trace["url"]
 
 
-async def _probe(kind: str, url: str, token_id: int | None = None) -> tuple[str, str]:
+async def _probe(kind: str, url: str, token_id: int | None = None,
+                 trace: dict[str, str] | None = None) -> tuple[str, str]:
     """Check whether an endpoint can actually be called, returning (status, note).
 
     status is one of live | auth | payment | dead | error. Only "live" earns the
@@ -442,17 +453,20 @@ async def _probe(kind: str, url: str, token_id: int | None = None) -> tuple[str,
     turn us away for credentials, without spending the operator's inference
     budget on a liveness check.
     """
+    trace = trace if trace is not None else {}
     try:
         await _assert_public_https(substitute_agent_id(url, token_id))
         async with httpx.AsyncClient(timeout=PROBE_TIMEOUT, follow_redirects=False) as client:
             if kind == "mcp":
                 url = substitute_agent_id(url, token_id)
+                trace["url"] = url
                 init = await _post(client, url, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                     "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "agentdock", "version": "1.0"}}})
                 _unwrap(_sse_or_json(init.text), "initialize")
                 return "live", "MCP initialize succeeded"
 
             target = await resolve_a2a_endpoint(client, url, token_id)
+            trace["url"] = target
             response = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "tasks/get",
                 "params": {"id": "agentdock-liveness-probe"}})
             envelope = _sse_or_json(response.text)
@@ -484,7 +498,8 @@ async def _probe(kind: str, url: str, token_id: int | None = None) -> tuple[str,
             # The endpoint asked for the agent's id in the path. Take it at its word,
             # once, rather than recording "faulty" for something addressable.
             if reply_error and token_id is not None and _asks_for_agent_id(reply_message):
-                send = await _post(client, f"{target.rstrip('/')}/{token_id}", probe_body)
+                trace["url"] = f"{target.rstrip('/')}/{token_id}"
+                send = await _post(client, trace["url"], probe_body)
                 envelope = _sse_or_json(send.text) or {}
                 reply_error = envelope.get("error") if isinstance(envelope.get("error"), dict) else None
                 reply_message = str((reply_error or {}).get("message") or "")

@@ -228,7 +228,7 @@ async def test_mcp_without_a_chat_tool_reports_its_real_tools(monkeypatch, publi
 async def test_probe_reports_live_for_a_healthy_mcp_server(monkeypatch, public_host):
     _install(monkeypatch, [_response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}})])
 
-    status, _note = await agent_client.probe_endpoint("mcp", "https://agent.example/rpc")
+    status, _note, _reached = await agent_client.probe_endpoint("mcp", "https://agent.example/rpc")
 
     assert status == "live"
 
@@ -237,7 +237,7 @@ async def test_probe_reports_live_for_a_healthy_mcp_server(monkeypatch, public_h
 async def test_probe_reports_auth_for_a_credentialled_endpoint(monkeypatch, public_host):
     _install(monkeypatch, [_response({"jsonrpc": "2.0", "id": 1, "error": {"code": "UNAUTHORIZED", "message": "Unauthorized"}})])
 
-    status, note = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+    status, note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
 
     assert status == "auth"
     assert "Unauthorized" in note
@@ -250,7 +250,7 @@ async def test_probe_treats_task_not_found_as_live(monkeypatch, public_host):
     in — without spending the agent's inference budget on a probe message."""
     _install(monkeypatch, [_response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}})])
 
-    status, _note = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+    status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
 
     assert status == "live"
 
@@ -268,7 +268,7 @@ async def test_probe_sends_no_message_when_the_lookup_already_answers(monkeypatc
 async def test_probe_reports_payment_for_a_402_endpoint(monkeypatch, public_host):
     _install(monkeypatch, [_response({"accepts": []}, status=402)])
 
-    status, _note = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+    status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
 
     assert status == "payment"
 
@@ -280,7 +280,7 @@ async def test_probe_reports_dead_when_the_host_is_unreachable(monkeypatch):
 
     monkeypatch.setattr(agent_client, "_assert_public_https", _boom)
 
-    status, note = await agent_client.probe_endpoint("mcp", "https://gone.example/rpc")
+    status, note, _reached = await agent_client.probe_endpoint("mcp", "https://gone.example/rpc")
 
     assert status == "dead"
     assert "resolved" in note
@@ -300,7 +300,7 @@ async def test_probe_reports_dead_on_connect_failure(monkeypatch, public_host):
 
     monkeypatch.setattr(agent_client.httpx, "AsyncClient", lambda **_kw: _Broken())
 
-    status, _note = await agent_client.probe_endpoint("mcp", "https://gone.example/rpc")
+    status, _note, _reached = await agent_client.probe_endpoint("mcp", "https://gone.example/rpc")
 
     assert status == "dead"
 
@@ -335,9 +335,62 @@ async def test_probe_follows_an_agent_card_before_judging_it(monkeypatch, public
         _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}}),
     ])
 
-    status, _note = await agent_client.probe_endpoint("a2a", "https://api.example/.well-known/agent-card.json")
+    status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://api.example/.well-known/agent-card.json")
 
     assert status == "live"
+
+
+@pytest.mark.anyio
+async def test_probe_reports_the_url_it_actually_reached(monkeypatch, public_host):
+    """A verdict about /.well-known/agent-card.json would name a URL that
+    answers 405 to the call we made. The page has to be able to say which
+    endpoint the result is about, so the probe reports where it landed."""
+    _install(monkeypatch, [
+        _response(CARD),
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}}),
+    ])
+
+    status, _note, reached = await agent_client.probe_endpoint(
+        "a2a", "https://api.example/.well-known/agent-card.json")
+
+    assert status == "live"
+    assert reached == "https://api.example/api/a2a"
+
+
+@pytest.mark.anyio
+async def test_probe_reports_the_filled_in_id_template(monkeypatch, public_host):
+    """The declared URL is not a legal request until the id is substituted."""
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}),
+    ])
+
+    _status, _note, reached = await agent_client.probe_endpoint(
+        "mcp", "https://api.example/agents/{agentId}/mcp", 255133)
+
+    assert reached == "https://api.example/agents/255133/mcp"
+
+
+@pytest.mark.anyio
+async def test_probe_reports_where_it_got_to_when_the_endpoint_dies(monkeypatch, public_host):
+    """A dead endpoint still has to say which URL died, or the verdict is
+    unattributable to any of the declared services."""
+    class _Broken:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def post(self, *_a, **_kw):
+            raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(agent_client.httpx, "AsyncClient", lambda **_kw: _Broken())
+
+    status, _note, reached = await agent_client.probe_endpoint(
+        "mcp", "https://gone.example/agents/{tokenId}/mcp", 42)
+
+    assert status == "dead"
+    assert reached == "https://gone.example/agents/42/mcp"
 
 
 @pytest.mark.anyio
@@ -391,7 +444,7 @@ async def test_probe_gives_up_on_a_hanging_endpoint(monkeypatch, public_host):
 
     monkeypatch.setattr(agent_client, "_assert_public_https", _hang)
 
-    status, note = await agent_client.probe_endpoint("mcp", "https://slow.example/mcp")
+    status, note, _reached = await agent_client.probe_endpoint("mcp", "https://slow.example/mcp")
 
     assert status == "dead"
     assert "did not answer" in note
@@ -406,7 +459,7 @@ async def test_probe_falls_back_to_a_message_when_the_lookup_is_rejected(monkeyp
         _response({"jsonrpc": "2.0", "id": 2, "result": {"parts": [{"kind": "text", "text": "pong"}]}}),
     ])
 
-    status, _note = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+    status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
 
     assert status == "live"
     assert [p["body"]["method"] for p in client.sent] == ["tasks/get", "message/send"]
@@ -422,7 +475,7 @@ async def test_reachable_is_not_callable(monkeypatch, public_host):
         _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "a valid agent tokenId is required"}}),
     ])
 
-    status, note = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+    status, note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
 
     assert status == "error"
     assert "tokenId" in note
@@ -461,7 +514,7 @@ async def test_platform_saying_unbound_is_not_reported_as_unreachable(monkeypatc
         "agentTokenId": "255133", "name": "Grid-v3.agent", "endpoint": None,
         "status": "UNBOUND", "presence": "offline", "skills": []})])
 
-    status, note = await agent_client.probe_endpoint(
+    status, note, _reached = await agent_client.probe_endpoint(
         "a2a", "https://platform.example/api/v1/a2a/agents/{agentId}/card", 255133)
 
     assert status == "unbound"
@@ -491,7 +544,7 @@ async def test_shared_endpoint_asking_for_an_id_is_retried_at_the_path_it_named(
         _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32040, "message": "agent 153799 is not open to inbound A2A calls"}}),
     ])
 
-    status, note = await agent_client.probe_endpoint("a2a", "https://api.example/api/a2a", 153799)
+    status, note, _reached = await agent_client.probe_endpoint("a2a", "https://api.example/api/a2a", 153799)
 
     assert status == "unbound"
     assert "not open to inbound" in note
@@ -506,7 +559,7 @@ async def test_agent_reachable_at_the_named_path_is_live(monkeypatch, public_hos
         _response({"jsonrpc": "2.0", "id": 2, "result": {"parts": [{"kind": "text", "text": "I am agent 7"}]}}),
     ])
 
-    status, _note = await agent_client.probe_endpoint("a2a", "https://api.example/api/a2a", 7)
+    status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://api.example/api/a2a", 7)
 
     assert status == "live"
 
@@ -662,7 +715,7 @@ def test_arguments_that_mean_the_caller_are_filled(arg):
 
 # --- a live tool list outranks the name an agent filed itself under ----------
 
-from scan8004 import derive_categories_from_capabilities, effective_categories
+from scan8004 import declared_services, derive_categories_from_capabilities, effective_categories
 
 
 def test_tools_classify_an_agent_its_name_misfiled():
@@ -702,3 +755,85 @@ def test_an_unreadable_tool_list_leaves_the_metadata_verdict_alone():
 
 def test_tools_that_say_nothing_recognisable_yield_no_category():
     assert derive_categories_from_capabilities([{"name": "ping", "description": "Returns pong"}]) == []
+
+
+def test_declared_services_counts_every_service_the_registration_publishes():
+    """8004scan's normalised map held one service for agent 255133 while the
+    registration's own metadata listed two, so the page reported "1 declared"
+    for a two-service agent. Both sources are read, deduplicated by endpoint."""
+    raw = {"chain_id": 56, "token_id": 255133,
+           "services": {"a2a": {"endpoint": "https://host.example/a2a/agents/{agentId}/card",
+                                "version": "0.3.0", "skills": []}},
+           "raw_metadata": {"offchain_content": {"services": [
+               {"name": "A2A", "version": "0.3.0",
+                "endpoint": "https://host.example/a2a/agents/{agentId}/card"},
+               {"name": "Termix Platform", "version": "aacp-platform-v1",
+                "endpoint": "https://host.example/agents/{agentId}/services"}]}}}
+
+    services = declared_services(raw)
+
+    assert [s["endpoint"] for s in services] == [
+        "https://host.example/a2a/agents/{agentId}/card",
+        "https://host.example/agents/{agentId}/services"]
+    assert services[0]["name"] == "a2a" and services[1]["name"] == "Termix Platform"
+
+
+def test_declared_services_reads_the_array_shape_agentdock_itself_writes():
+    """Our own registration writer emits services as a list, which a map reader
+    labels "0" and JSON-dumps whole."""
+    raw = {"services": [{"name": "MCP", "endpoint": "https://mine.example/mcp", "version": "1"}]}
+
+    assert declared_services(raw) == [
+        {"name": "MCP", "endpoint": "https://mine.example/mcp", "version": "1",
+         "tool_count": None, "skill_count": None}]
+
+
+def test_declared_services_is_empty_rather_than_inventing_an_entry():
+    assert declared_services({"services": {}, "raw_metadata": {}}) == []
+    assert declared_services({"services": {"web": {"endpoint": "  "}}}) == []
+
+
+def test_declared_services_keeps_two_services_that_share_one_host():
+    """An A2A face and an MCP face of the same URL are two services. Collapsing
+    them on the URL alone deleted one and undercounted the badge."""
+    raw = {"services": {"a2a": {"endpoint": "https://one.example/rpc"},
+                        "mcp": {"endpoint": "https://one.example/rpc"}}}
+
+    assert [s["name"] for s in declared_services(raw)] == ["a2a", "mcp"]
+
+
+def test_declared_services_survives_owner_written_junk():
+    """`tools` and `skills` come from registration JSON nobody validates. A
+    number there used to 500 the whole agent-detail route."""
+    raw = {"services": {"mcp": {"endpoint": "https://x.example/mcp", "tools": 7, "skills": "many"},
+                        "a2a": {"endpoint": "https://x.example/a2a", "tools": None}},
+           "raw_metadata": {"offchain_content": {"services": "not-a-list"}}}
+
+    services = declared_services(raw)
+
+    assert [s["endpoint"] for s in services] == ["https://x.example/mcp", "https://x.example/a2a"]
+    assert all(s["tool_count"] is None and s["skill_count"] is None for s in services)
+
+
+def test_no_endpoint_verdict_retracts_the_urls_of_the_previous_one():
+    """The sweep writes with $set, so a verdict that finds nothing to call must
+    clear the URLs itself — otherwise the page keeps naming an endpoint it says
+    was never published, and stamps a declared service as tested."""
+    from server import NO_ENDPOINT_VERDICT
+
+    assert NO_ENDPOINT_VERDICT["agent_endpoint"] is None
+    assert NO_ENDPOINT_VERDICT["endpoint_called"] is None
+    assert NO_ENDPOINT_VERDICT["activatable"] is False
+
+
+def test_a_verdict_is_shared_between_agents_but_an_id_addressed_url_is_not():
+    """One URL serving hundreds of registrations is probed once. The retry that
+    appends an agent's own id is the exception: that answer is about one agent."""
+    from server import shareable_reached
+
+    assert shareable_reached("https://host.example/a2a", 255133) == "https://host.example/a2a"
+    assert shareable_reached("https://host.example/a2a/255133", 255133) is None
+    assert shareable_reached("https://host.example/a2a/255133/", 255133) is None
+    # A different agent's id in the path is not this agent's, so it still shares.
+    assert shareable_reached("https://host.example/a2a/999", 255133) == "https://host.example/a2a/999"
+    assert shareable_reached("https://host.example/a2a", None) == "https://host.example/a2a"

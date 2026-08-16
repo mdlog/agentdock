@@ -340,6 +340,62 @@ def public_projection(raw: dict, chain_id: int, is_testnet: bool) -> dict:
     }
 
 
+def declared_services(raw: dict) -> list[dict]:
+    """Every service the registration declares, as one flat list.
+
+    8004scan keeps them in two places and they do not agree. Its normalised
+    `services` map held one entry for agent 255133 while the registration's own
+    metadata listed two, so a page rendering only the map reported "1 declared"
+    for a two-service agent. AgentDock's own registration writer emits an array
+    rather than a map, which the map reader would have labelled "0". Reading
+    both and deduplicating by endpoint is the only shape that counts honestly.
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(name, endpoint, version, extra: dict) -> None:
+        url = str(endpoint or "").strip()
+        label = str(name or "service")
+        # Deduplicate on name *and* URL. The same service appears twice because
+        # we read two sources ("a2a" in the map, "A2A" in the metadata), but two
+        # differently named services can legitimately share one host, and
+        # collapsing those loses a real entry from the count.
+        key = (label.strip().lower(), url)
+        if not url or key in seen:
+            return
+        seen.add(key)
+        # `tools` and `skills` come from owner-written registration JSON and are
+        # not guaranteed to be lists; len() on a number would 500 the page.
+        tools = extra.get("tools")
+        skills = extra.get("skills")
+        out.append({"name": label, "endpoint": url,
+                    "version": str(version) if version else None,
+                    "tool_count": len(tools) if isinstance(tools, list) and tools else None,
+                    "skill_count": len(skills) if isinstance(skills, list) and skills else None})
+
+    services = raw.get("services")
+    if isinstance(services, dict):
+        for name, value in services.items():
+            if isinstance(value, dict):
+                add(name, value.get("endpoint") or value.get("url"), value.get("version"), value)
+            elif isinstance(value, str):
+                add(name, value, None, {})
+    elif isinstance(services, list):
+        for item in services:
+            if isinstance(item, dict):
+                add(item.get("name"), item.get("endpoint") or item.get("url"), item.get("version"), item)
+
+    # The registration's own list, which can carry entries the map dropped.
+    metadata = raw.get("raw_metadata")
+    offchain = metadata.get("offchain_content") if isinstance(metadata, dict) else None
+    declared = offchain.get("services") if isinstance(offchain, dict) else None
+    if isinstance(declared, list):
+        for item in declared:
+            if isinstance(item, dict):
+                add(item.get("name"), item.get("endpoint") or item.get("url"), item.get("version"), item)
+    return out
+
+
 def detail_projection(raw: dict) -> dict:
     chain_id = int(raw["chain_id"])
     token_id = int(raw["token_id"])
@@ -352,6 +408,7 @@ def detail_projection(raw: dict) -> dict:
         "tags": raw.get("tags") or [],
         "categories": raw.get("categories") or [],
         "services": raw.get("services") or {},
+        "declared_services": declared_services(raw),
         "scores": raw.get("scores") or {},
         "quality_score": raw.get("quality_score"),
         "popularity_score": raw.get("popularity_score"),

@@ -264,11 +264,24 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
     # earlier metadata-only pass have none, so they are re-examined rather than
     # left carrying a claim nobody ever tested.
     stale_before = (datetime.now(timezone.utc) - timedelta(hours=ENDPOINT_VERDICT_TTL_HOURS)).isoformat()
+    # Scoping this to categorised agents alone stranded 26 agents that answered
+    # a probe but matched no theme: they kept an Activate button the sweep could
+    # never re-test, so the marketplace advertised them while their detail page
+    # said "not called yet". Anything the marketplace can surface belongs here,
+    # plus every endpoint that showed a sign of life — an `error` is the verdict
+    # most likely to have been our fault, and an agent can come back.
+    # `error` is deliberately NOT here. A probe that errors writes `error`
+    # again, so the status re-admits its own agents forever: 1,095 registrations
+    # share one URL that answers 405 to the call we make, and re-deriving that
+    # same 405 twice a day would be 1,095 pointless requests to one host.
+    reachable = {"$or": [{"categories": {"$ne": []}},
+                         {"activatable": True},
+                         {"endpoint_status": {"$in": ["live", "auth", "payment"]}}]}
+    unverified = {"$or": [{"endpoint_status": {"$exists": False}},
+                          {"endpoint_checked_at": {"$lt": stale_before}},
+                          {"endpoint_checked_at": {"$exists": False}}]}
     cursor = db.scan_agents.find(
-        {"chain_id": chain_id, "categories": {"$ne": []},
-         "$or": [{"endpoint_status": {"$exists": False}},
-                 {"endpoint_checked_at": {"$lt": stale_before}},
-                 {"endpoint_checked_at": {"$exists": False}}]},
+        {"chain_id": chain_id, "$and": [reachable, unverified]},
         {"_id": 0, "id": 1, "chain_id": 1, "token_id": 1, "raw_8004scan_detail": 1, "name": 1, "description": 1},
     ).limit(limit)
     client = Scan8004Client()
@@ -309,28 +322,53 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
         # agents is probed once, and no host is asked more than one question at a
         # time. Templated URLs resolve per-agent, so they are NOT deduplicated —
         # each agent's own id may produce a different verdict.
-        verdict_cache: dict[str, tuple[str, str]] = {}
+        # Every task reaches the lookup below before the first probe returns,
+        # so a cache written only on completion never hit once — 1,095 agents
+        # sharing one URL each sent their own request. Reserving the slot before
+        # awaiting is what makes the dedup real.
+        verdict_cache: dict[str, asyncio.Future] = {}
         host_locks: dict[str, asyncio.Lock] = {}
 
         async def verify(agent: dict, ep: tuple[str, str] | None, ranked: dict) -> tuple[dict, dict]:
             if not ep:
-                return agent, {"endpoint_status": "none", "endpoint_note": "No endpoint published onchain", "activatable": False, **ranked}
+                # Clearing both URLs matters: $set leaves whatever the last
+                # sweep stored, and the detail page would then stamp a service
+                # "tested below" and name a URL for a call this sweep just
+                # recorded there was nothing to make.
+                return agent, {**NO_ENDPOINT_VERDICT, **ranked}
             kind, url = ep
             token_id = agent["token_id"]
             resolved = agent_client.substitute_agent_id(url, token_id)
             cache_key = f"{kind}|{resolved}"
-            cached = verdict_cache.get(cache_key)
-            if cached:
-                status, note = cached
+            pending = verdict_cache.get(cache_key)
+            if pending is not None:
+                status, note, shared = await pending
+                # A shared verdict says what that URL does, not where this
+                # agent's own request landed, so fall back to its own address.
+                reached = shared or resolved
             else:
-                host = urlparse(resolved).hostname or resolved
-                async with gate:
-                    async with host_locks.setdefault(host, asyncio.Lock()):
-                        status, note = await agent_client.probe_endpoint(kind, url, token_id)
-                        await asyncio.sleep(0.25)
-                verdict_cache[cache_key] = (status, note)
-            update = {"endpoint_kind": kind, "agent_endpoint": url, "endpoint_status": status,
-                      "endpoint_note": note[:300], "activatable": status == "live"}
+                slot = asyncio.get_running_loop().create_future()
+                verdict_cache[cache_key] = slot
+                try:
+                    host = urlparse(resolved).hostname or resolved
+                    async with gate:
+                        async with host_locks.setdefault(host, asyncio.Lock()):
+                            status, note, reached = await agent_client.probe_endpoint(kind, url, token_id)
+                            await asyncio.sleep(0.25)
+                except BaseException as exc:
+                    verdict_cache.pop(cache_key, None)
+                    slot.set_exception(exc)
+                    slot.exception()
+                    raise
+                # An endpoint that had to be re-addressed with this agent's own
+                # id produced a URL no other agent may be told it called.
+                slot.set_result((status, note, shareable_reached(reached, token_id)))
+            # `agent_endpoint` is what the agent published; `endpoint_called` is
+            # what we requested after filling in the id template and following
+            # any agent card. Storing only the first left the verdict unable to
+            # say which URL it was about.
+            update = {"endpoint_kind": kind, "agent_endpoint": url, "endpoint_called": reached,
+                      "endpoint_status": status, "endpoint_note": note[:300], "activatable": status == "live"}
             if status == "live":
                 # Ask the handful of working agents what they can do. Their own
                 # tool list is the only honest basis for telling a visitor what
@@ -604,6 +642,23 @@ async def my_agents(address: str, network: str = "mainnet"):
         return {"items": cached, "total": len(cached), "upstream_total": None, "network": network, "owner_address": address, "source": "last_known_good", "degraded": True}
 
 
+NO_ENDPOINT_VERDICT = {"endpoint_status": "none", "endpoint_note": "No endpoint published onchain",
+                       "activatable": False, "agent_endpoint": None, "endpoint_called": None}
+
+
+def shareable_reached(reached: str, token_id: int | None) -> str | None:
+    """The reached URL, or None when it belongs to one agent only.
+
+    Agents sharing a URL share a verdict, which is what keeps 1,095
+    registrations on one host from sending 1,095 requests. But an endpoint that
+    had to be re-addressed with an agent's own id answers at a URL no other
+    agent may be told it called, so that one is not shared.
+    """
+    if token_id is not None and reached.rstrip("/").endswith(f"/{token_id}"):
+        return None
+    return reached
+
+
 def _endpoint_verdict(record: dict | None) -> dict | None:
     """What happened when AgentDock last called this agent.
 
@@ -619,6 +674,10 @@ def _endpoint_verdict(record: dict | None) -> dict | None:
         "activatable": bool(record.get("activatable")),
         "checked_at": record.get("endpoint_checked_at"),
         "endpoint_kind": record.get("endpoint_kind"),
+        # Which of the declared services we tested, and the URL that request
+        # actually went to once the id template and agent card were resolved.
+        "declared_endpoint": record.get("agent_endpoint"),
+        "called_url": record.get("endpoint_called"),
     }
 
 

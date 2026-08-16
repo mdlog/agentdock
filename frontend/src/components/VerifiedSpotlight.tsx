@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowUpRight, BadgeCheck } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -28,49 +28,73 @@ type Verified = {
 export const VerifiedSpotlight = ({ intervalMs = 9000 }: { intervalMs?: number }) => {
   const [agents, setAgents] = useState<Verified[]>([]);
   const [index, setIndex] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [catalogue, setCatalogue] = useState(0);
+  // The agent on its way out. Holding both for the length of the slide is what
+  // makes this read as one card replacing another, rather than the same card
+  // blinking with different text in it.
+  const [leaving, setLeaving] = useState<Verified | null>(null);
 
   useEffect(() => {
     api.get("/marketplace/verified?limit=8")
-      .then(r => { setAgents(r.data.items || []); setTotal(r.data.total_live || 0); setCatalogue(r.data.catalogue_total || 0); })
+      .then(r => setAgents(r.data.items || []))
       .catch(() => setAgents([]));
   }, []);
 
   useEffect(() => {
     if (agents.length < 2) return;
-    const timer = setInterval(() => setIndex(i => (i + 1) % agents.length), intervalMs);
+    const timer = setInterval(() => {
+      setIndex(current => {
+        setLeaving(agents[current]);
+        return (current + 1) % agents.length;
+      });
+    }, intervalMs);
     return () => clearInterval(timer);
   }, [agents, intervalMs]);
+
+  useEffect(() => {
+    if (!leaving) return;
+    const timer = setTimeout(() => setLeaving(null), 700);
+    return () => clearTimeout(timer);
+  }, [leaving]);
 
   if (!agents.length) return null;
   const agent = agents[index];
   const backend = process.env.REACT_APP_BACKEND_URL;
 
+  const slide = (item: Verified, role: "in" | "out") => (
+    <article
+      key={`${role}-${item.id}`}
+      className={`spotlight-slide ${role}`}
+      data-testid={role === "in" ? `spotlight-${item.token_id}` : undefined}
+      aria-hidden={role === "out"}
+    >
+      <div className="spotlight-head">
+        <AgentAvatar
+          name={`${item.chain_id}-${item.token_id}-${item.name}`}
+          testId={`spotlight-avatar-${item.token_id}`}
+          size={46}
+          src={item.has_source_icon ? `${backend}/api/onchain/agents/mainnet/${item.token_id}/icon` : undefined}
+        />
+        <div>
+          <strong>{item.name}</strong>
+          <span>{item.endpoint_kind?.toUpperCase()} · {item.tool_count} tools it declares</span>
+        </div>
+      </div>
+      <p>{item.description}</p>
+      {/* The departing copy must not be reachable by keyboard while it slides. */}
+      <Link to={`/hire/${item.id}`} data-testid={`spotlight-activate-${item.token_id}`} tabIndex={role === "out" ? -1 : 0}>
+        Activate <ArrowUpRight size={14} />
+      </Link>
+    </article>
+  );
+
   return (
     <aside className="verified-spotlight" data-testid="verified-spotlight">
-      {/* The ratio is the argument: finding these is what the marketplace is for. */}
-      <p className="spotlight-kicker"><BadgeCheck size={13} /> {total} callable of {catalogue.toLocaleString()}</p>
-      {/* Keyed on the agent so React swaps the node and the entry animation
-          replays, rather than mutating text in place. */}
-      <article key={agent.id} data-testid={`spotlight-${agent.token_id}`}>
-        <div className="spotlight-head">
-          <AgentAvatar
-            name={`${agent.chain_id}-${agent.token_id}-${agent.name}`}
-            testId={`spotlight-avatar-${agent.token_id}`}
-            size={46}
-            src={agent.has_source_icon ? `${backend}/api/onchain/agents/mainnet/${agent.token_id}/icon` : undefined}
-          />
-          <div>
-            <strong>{agent.name}</strong>
-            <span>{agent.endpoint_kind?.toUpperCase()} · {agent.tool_count} tools it declares</span>
-          </div>
-        </div>
-        <p>{agent.description}</p>
-        <Link to={`/hire/${agent.id}`} data-testid={`spotlight-activate-${agent.token_id}`}>
-          Activate <ArrowUpRight size={14} />
-        </Link>
-      </article>
+      {/* Both slides share one grid cell, so the outgoing card travels left as
+          the incoming one arrives from the right and the box never resizes. */}
+      <div className="spotlight-track">
+        {leaving && slide(leaving, "out")}
+        {slide(agent, "in")}
+      </div>
       <div className="spotlight-dots" aria-hidden>
         {agents.map((a, i) => <span key={a.id} className={i === index ? "on" : ""} />)}
       </div>

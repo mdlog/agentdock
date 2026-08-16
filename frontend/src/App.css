@@ -110,9 +110,10 @@ a { color: inherit; text-decoration: none; }
    text colours on this card, the brighter teal put the description at
    3.66 and the meta line at 2.54, both under the 4.5 readability floor.
    This still reads as teal and clears it everywhere. */
-  background:linear-gradient(152deg,#111827 0%,#0e2f2b 55%,#0b453f 100%);border:1px solid rgba(94,234,212,.22);border-radius:10px;padding:17px 22px 15px;box-shadow:0 10px 30px rgba(15,23,42,.22);overflow:hidden}.verified-spotlight:before{content:"";position:absolute;inset:-40% 55% 55% -20%;background:radial-gradient(circle,rgba(94,234,212,.2),transparent 70%);pointer-events:none}.verified-spotlight>*{position:relative}
-.spotlight-kicker{display:flex;align-items:center;gap:7px;margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#5eead4}
-.verified-spotlight article{display:block}
+  background:linear-gradient(152deg,#111827 0%,#0e2f2b 55%,#0b453f 100%);border:1px solid rgba(94,234,212,.22);border-radius:10px;padding:20px 22px 16px;box-shadow:0 10px 30px rgba(15,23,42,.22);overflow:hidden}.verified-spotlight:before{content:"";position:absolute;inset:-40% 55% 55% -20%;background:radial-gradient(circle,rgba(94,234,212,.2),transparent 70%);pointer-events:none}.verified-spotlight>*{position:relative}
+
+.spotlight-track{display:grid}
+.spotlight-slide{grid-area:1/1;display:block}
 .spotlight-head{display:flex;align-items:center;gap:13px}
 .spotlight-head strong{display:block;font-size:16px;line-height:1.25;color:white}
 .spotlight-head span{display:block;margin-top:3px;font-size:11.5px;color:#9fb3c8}
@@ -123,8 +124,10 @@ a { color: inherit; text-decoration: none; }
 .spotlight-dots span{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.22)}
 .spotlight-dots span.on{background:#5eead4}
 @media(prefers-reduced-motion:no-preference){
-  .verified-spotlight article{animation:spotlight-in .5s ease both}
-  @keyframes spotlight-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .spotlight-slide.in{animation:slide-in .65s cubic-bezier(.22,1,.36,1) both}
+  .spotlight-slide.out{animation:slide-out .65s cubic-bezier(.22,1,.36,1) both}
+  @keyframes slide-in{from{transform:translateX(38px);opacity:0}to{transform:none;opacity:1}}
+  @keyframes slide-out{from{transform:none;opacity:1}to{transform:translateX(-38px);opacity:0}}
   .spotlight-dots span{transition:background .3s ease}
 }
 @media(max-width:1240px){.search-stage{grid-template-columns:1fr}.verified-spotlight{max-width:520px}}

@@ -305,6 +305,23 @@ class Scan8004Client:
             raise Scan8004Error("Malformed 8004scan feedback detail response") from exc
 
 
+# Fields the bulk listing route does not carry. It returns them as null for
+# every row, so writing those nulls erases what a per-agent detail call already
+# established — which is exactly how network rank went blank on the marketplace
+# while the detail page still showed it.
+VOLATILE_FROM_DETAIL = ("rank", "network_rank", "total_score", "health_score", "average_score")
+
+
+def durable(projection: dict) -> dict:
+    """The projection with detail-only fields dropped where the source had none.
+
+    A null here means "this route does not report it", never "the value is now
+    null", so it must not be written over a number we already know.
+    """
+    return {k: v for k, v in projection.items()
+            if not (k in VOLATILE_FROM_DETAIL and v is None)}
+
+
 def public_projection(raw: dict, chain_id: int, is_testnet: bool) -> dict:
     token_id = int(raw["token_id"])
     name = raw.get("name") or f"ERC-8004 Agent #{token_id}"
@@ -329,7 +346,9 @@ def public_projection(raw: dict, chain_id: int, is_testnet: bool) -> dict:
         "x402_supported": bool(raw.get("x402_supported")),
         "is_verified": bool(raw.get("is_verified")),
         "total_score": raw.get("total_score"),
-        "rank": raw.get("rank"),
+        # 8004scan spells the same number two ways depending on the route.
+        # Sampled across every agent that carries both, rank == network_rank.
+        "rank": raw.get("rank") if raw.get("rank") is not None else raw.get("network_rank"),
         "health_score": raw.get("health_score"),
         "total_feedbacks": raw.get("total_feedbacks") or 0,
         "average_score": raw.get("average_score"),
@@ -475,7 +494,7 @@ async def _sync_agents(db, chain_id: int, is_testnet: bool) -> dict:
             projection = public_projection(raw, chain_id, is_testnet)
             await db.scan_agents.update_one(
                 {"chain_id": chain_id, "token_id": projection["token_id"]},
-                {"$set": {**projection, "raw_8004scan": raw, "synced_at": utc_now()}},
+                {"$set": {**durable(projection), "raw_8004scan": raw, "synced_at": utc_now()}},
                 upsert=True,
             )
             imported += 1
@@ -551,7 +570,7 @@ async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
                 projection = public_projection(raw, chain_id, bool(raw.get("is_testnet")))
                 ops.append(UpdateOne(
                     {"chain_id": chain_id, "token_id": projection["token_id"]},
-                    {"$set": {**projection, "raw_8004scan": raw, "synced_at": utc_now()}},
+                    {"$set": {**durable(projection), "raw_8004scan": raw, "synced_at": utc_now()}},
                     upsert=True,
                 ))
             await db.scan_agents.bulk_write(ops, ordered=False)
@@ -615,7 +634,7 @@ async def sync_new_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
                 projection = public_projection(raw, chain_id, bool(raw.get("is_testnet")))
                 ops.append(UpdateOne(
                     {"chain_id": chain_id, "token_id": projection["token_id"]},
-                    {"$set": {**projection, "raw_8004scan": raw, "synced_at": utc_now()}},
+                    {"$set": {**durable(projection), "raw_8004scan": raw, "synced_at": utc_now()}},
                     upsert=True,
                 ))
             outcome = await db.scan_agents.bulk_write(ops, ordered=False)

@@ -715,7 +715,8 @@ def test_arguments_that_mean_the_caller_are_filled(arg):
 
 # --- a live tool list outranks the name an agent filed itself under ----------
 
-from scan8004 import declared_services, derive_categories_from_capabilities, effective_categories
+from scan8004 import (declared_services, derive_categories_from_capabilities, durable,
+                      effective_categories, public_projection)
 
 
 def test_tools_classify_an_agent_its_name_misfiled():
@@ -837,3 +838,30 @@ def test_a_verdict_is_shared_between_agents_but_an_id_addressed_url_is_not():
     # A different agent's id in the path is not this agent's, so it still shares.
     assert shareable_reached("https://host.example/a2a/999", 255133) == "https://host.example/a2a/999"
     assert shareable_reached("https://host.example/a2a", None) == "https://host.example/a2a"
+
+
+def test_sync_never_writes_a_null_over_a_rank_it_already_knows():
+    """8004scan's bulk listing returns rank as null for every row. Writing that
+    null erased the rank a per-agent detail call had established, which is how
+    the marketplace cards went blank while the detail page still showed one."""
+    from_bulk = {"token_id": 49637, "rank": None, "total_score": 91.2, "health_score": None, "name": "OpenOdds.Ai"}
+
+    written = durable(from_bulk)
+
+    assert "rank" not in written and "health_score" not in written
+    assert written["total_score"] == 91.2
+    assert written["name"] == "OpenOdds.Ai"
+    # A real zero is a value, not an absence, and must still be written.
+    assert durable({"rank": 0})["rank"] == 0
+
+
+def test_rank_falls_back_to_the_other_spelling_8004scan_uses():
+    """Some payloads carry only network_rank. Sampled across every agent that
+    has both, the two are the same number, so a card must not go blank over a
+    naming difference."""
+    raw = {"chain_id": 56, "token_id": 49637, "network_rank": 5,
+           "name": "OpenOdds.Ai", "description": "", "supported_protocols": []}
+
+    assert public_projection(raw, 56, False)["rank"] == 5
+    # An explicit rank always wins over the fallback.
+    assert public_projection({**raw, "rank": 12}, 56, False)["rank"] == 12

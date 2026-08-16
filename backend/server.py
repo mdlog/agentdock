@@ -311,6 +311,11 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
             # and gives a browsable agent the number its card asks for.
             ranked = {k: detail.get(k) for k in ("rank", "network_rank", "total_score", "health_score",
                                                  "total_feedbacks", "average_score") if detail.get(k) is not None}
+            # Some detail payloads carry only the network_rank spelling, and the
+            # card reads `rank`. They are the same number wherever both appear,
+            # so the card should not go blank over a naming difference.
+            if "rank" not in ranked and "network_rank" in ranked:
+                ranked["rank"] = ranked["network_rank"]
             resolved.append((agent, agent_client.pick_endpoint(detail), ranked))
             await asyncio.sleep(0.34)
 

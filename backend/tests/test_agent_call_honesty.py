@@ -658,3 +658,47 @@ def test_arguments_that_mean_the_caller_are_filled(arg):
         "required": [arg], "properties": {arg: {"type": "string"}}}}
 
     assert agent_client._safe_readonly_call(tool, wallet="0x" + "a" * 40) == {arg: "0x" + "a" * 40}
+
+
+# --- a live tool list outranks the name an agent filed itself under ----------
+
+from scan8004 import derive_categories_from_capabilities, effective_categories
+
+
+def test_tools_classify_an_agent_its_name_misfiled():
+    """The real case: "Fly Marketing Agent" matched yield optimisation because
+    its blurb says "optimise". Its three tools are about shop marketing."""
+    caps = [{"name": "generate_marketing_plan", "description": "Build a marketing plan for a shop"},
+            {"name": "check_geo_ranking", "description": "Check a shop's local ranking"}]
+
+    categories, source = effective_categories("Fly Marketing Agent", "AI that optimises your shop", caps)
+
+    assert categories == []
+    assert source == "capabilities"
+
+
+def test_a_lending_position_is_not_an_lp_range():
+    """"position" means an LP range in a DEX and a loan in a lending protocol;
+    matching it filed Aave and the Lending Guardian as rebalancing agents."""
+    lending = [{"name": "getUserHealthIndicators", "description": "Health factor and borrow position for a user"}]
+
+    assert derive_categories_from_capabilities(lending) == ["health-factor"]
+
+
+def test_concentrated_liquidity_tools_are_rebalancing():
+    clm = [{"name": "topaz_get_cl_position_by_id", "description": "Concentrated liquidity position with tick range"}]
+
+    assert derive_categories_from_capabilities(clm) == ["rebalancing"]
+
+
+def test_an_unreadable_tool_list_leaves_the_metadata_verdict_alone():
+    """An A2A agent publishes no tools/list. Erasing its category because of a
+    silence we caused would be our failure recorded as its absence."""
+    categories, source = effective_categories("BNB LP Range Rebalancer", "Rebalances LP ranges on PancakeSwap", [])
+
+    assert categories == ["rebalancing"]
+    assert source == "metadata"
+
+
+def test_tools_that_say_nothing_recognisable_yield_no_category():
+    assert derive_categories_from_capabilities([{"name": "ping", "description": "Returns pong"}]) == []

@@ -30,9 +30,48 @@ AGENT_CATEGORIES = [
 _CATEGORY_RES = [(c["key"], re.compile(c["pattern"], re.IGNORECASE)) for c in AGENT_CATEGORIES]
 
 
+# What an agent's own tool vocabulary says about the job it does. Applied to
+# tool names and their descriptions, which are far more precise than a
+# marketing blurb: "CMC.agent" was filed under grid trading because its
+# description mentions an "interactive features grid" on a landing page, while
+# an agent whose tools are getSupplyAPR and getBorrowAPR is unmistakably about
+# lending regardless of what it calls itself.
+_CAPABILITY_PATTERNS = [
+    # Deliberately excludes a bare "position": in a DEX it means an LP range, in
+    # a lending protocol it means a loan, and matching it filed Aave and the
+    # Lending Guardian as rebalancing agents.
+    ("rebalancing", r"rebalanc|\bticks?\b|price range|concentrated|\bclmm\b|lp ?range|"
+                    r"increase liquidity|decrease liquidity|collect ?fees|mint ?position"),
+    ("grid-trading", r"\bgrid\b|\bdca\b|dollar[ -]?cost|limit ?order|ladder|\btwap\b"),
+    ("yield-optimisation", r"\bapr\b|\bapy\b|yield|vault|farm|harvest|compound|emission|"
+                           r"\bgauge\b|staking reward|\bbribe\b|best rate"),
+    ("health-factor", r"health ?factor|liquidat|collateral|\bltv\b|loan[ -]?to[ -]?value|"
+                      r"borrow|\bdebt\b|repay|margin|risk band|stress ?test"),
+]
+_CAPABILITY_RES = [(key, re.compile(pattern, re.IGNORECASE)) for key, pattern in _CAPABILITY_PATTERNS]
+
+
+def derive_categories_from_capabilities(capabilities: list[dict]) -> list[str]:
+    """Classify an agent by the tools it declares, not by what it calls itself.
+
+    Only meaningful for agents whose endpoint answered, which is the point: a
+    verdict drawn from a live tool list is evidence, where one drawn from a name
+    is a guess. Returns [] when the tools say nothing recognisable, so an agent
+    is never filed under a category to make a number look better.
+    """
+    corpus = " ".join(
+        f"{cap.get('name', '')} {cap.get('description', '')}" for cap in capabilities or []
+    )
+    if not corpus.strip():
+        return []
+    return [key for key, expression in _CAPABILITY_RES if expression.search(corpus)]
+
+
 def derive_categories(name: str | None, description: str | None) -> list[str]:
     text = f"{name or ''} {description or ''}"
     return [key for key, rx in _CATEGORY_RES if rx.search(text)]
+
+
 MAINNET_CHAIN_ID = 56
 TESTNET_CHAIN_ID = 97
 
@@ -41,6 +80,20 @@ TESTNET_CHAIN_ID = 97
 # 47,600 rows through before escalating mid-run. A descriptive agent string is
 # accepted; nothing here pretends to be a browser.
 USER_AGENT = "AgentDock/1.0 (+https://github.com/mdlog/agentdock)"
+
+
+def effective_categories(name: str, description: str, capabilities: list[dict] | None) -> tuple[list[str], str]:
+    """Categories for an agent, plus what they were derived from.
+
+    A live tool list is evidence and outranks a name: "Fly Marketing Agent" was
+    filed under yield optimisation because its blurb says "optimise", and its
+    three tools are about shop marketing. An empty tool list means we could not
+    read one — an A2A agent publishes no tools/list — so the metadata verdict
+    stands rather than being erased by a silence we caused.
+    """
+    if capabilities:
+        return derive_categories_from_capabilities(capabilities), "capabilities"
+    return derive_categories(name, description), "metadata"
 
 
 class Scan8004Error(RuntimeError):

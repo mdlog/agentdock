@@ -15,7 +15,7 @@ import b402
 from guards import client_key, icon_limiter, require_operator, run_limiter, task_limiter
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import AuditEvent, AuthorizeRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
-from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks, sync_new_agents
+from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, effective_categories, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks, sync_new_agents
 from icon_proxy import get_agent_icon
 
 
@@ -269,7 +269,7 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
          "$or": [{"endpoint_status": {"$exists": False}},
                  {"endpoint_checked_at": {"$lt": stale_before}},
                  {"endpoint_checked_at": {"$exists": False}}]},
-        {"_id": 0, "id": 1, "chain_id": 1, "token_id": 1, "raw_8004scan_detail": 1},
+        {"_id": 0, "id": 1, "chain_id": 1, "token_id": 1, "raw_8004scan_detail": 1, "name": 1, "description": 1},
     ).limit(limit)
     client = Scan8004Client()
     checked = activatable = 0
@@ -332,6 +332,14 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
                 caps = await agent_client.fetch_capabilities(kind, url, token_id)
                 update["capabilities"] = caps
                 update["suggested_objectives"] = agent_client.suggested_objectives(caps)
+                # A live tool list outranks the name it was filed under. Kept
+                # here rather than at sync time because only a probe can produce
+                # it, and the loop re-runs hourly, so a name-derived value that a
+                # catalogue refresh writes back is corrected within the hour.
+                categories, source = effective_categories(
+                    agent.get("name") or "", agent.get("description") or "", caps)
+                update["categories"] = categories
+                update["categories_from"] = source
             return agent, update
 
         for completed in asyncio.as_completed([verify(a, e) for a, e in resolved]):

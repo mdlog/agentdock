@@ -563,7 +563,7 @@ async def onchain_agent_detail(network: str, token_id: int):
     ).isoformat():
         raw = cached["raw_8004scan_detail"]
         feedback_rows = await db.scan_feedbacks.find(
-            {"chain_id": chain_id, "agent_id": raw.get("agent_id")}, {"_id": 0, "raw_8004scan": 0}
+            {"chain_id": chain_id, "agent_id": raw.get("id")}, {"_id": 0, "raw_8004scan": 0}
         ).sort("submitted_at", -1).to_list(20)
         return {"agent": detail_projection(raw), "feedbacks": [feedback_projection(r) for r in feedback_rows],
                 "source": "synced", "fetched_at": cached.get("synced_at")}
@@ -582,7 +582,7 @@ async def onchain_agent_detail(network: str, token_id: int):
         if not cached:
             raise HTTPException(404, "Agent not found")
         raw = cached.get("raw_8004scan_detail") or cached.get("raw_8004scan")
-        feedback_rows = await db.scan_feedbacks.find({"chain_id": chain_id, "agent_id": raw.get("agent_id")}, {"_id": 0, "raw_8004scan": 0}).sort("submitted_at", -1).to_list(20)
+        feedback_rows = await db.scan_feedbacks.find({"chain_id": chain_id, "agent_id": raw.get("id")}, {"_id": 0, "raw_8004scan": 0}).sort("submitted_at", -1).to_list(20)
         feedbacks = [feedback_projection(row) for row in feedback_rows]
         source = "last_known_good"
     return {"agent": detail_projection(raw), "feedbacks": feedbacks, "source": source, "fetched_at": now_iso()}

@@ -214,16 +214,27 @@ class Scan8004Client:
             raise Scan8004Error("8004scan returned records outside the requested chain")
         return items, payload.get("total")
 
-    async def list_feedbacks(self, chain_id: int, is_testnet: bool, page: int = 1, limit: int = 100) -> tuple[list[dict], dict]:
-        response = await self._get("/feedbacks", {"page": page, "limit": limit, "chainId": chain_id})
+    async def list_feedbacks(self, chain_id: int, is_testnet: bool, offset: int = 0, limit: int = 100) -> tuple[list[dict], int | None]:
+        """Offset-paged feedback from the 180/min route.
+
+        Three things about this endpoint had to be measured rather than assumed,
+        and each mirrors the agents route: the fast base filters on `chain_id`
+        while /public wants `chainId` (passing chain_id there returns all
+        3.5 million rows across every chain); the response is {items, total},
+        not {data, meta.pagination}; and `page` is ignored — page 2 returns page
+        1 byte for byte, so paging has to use `offset`.
+        """
+        response = await self._get("/feedbacks", {"offset": offset, "limit": limit, "chain_id": chain_id},
+                                   base=self.detail_base_url)
         try:
             payload = response.json()
-            data = payload["data"]
-            pagination = payload["meta"]["pagination"]
+            items = payload["items"]
         except (ValueError, KeyError, TypeError) as exc:
             raise Scan8004Error("Malformed 8004scan feedback response") from exc
-        valid = [row for row in data if row.get("chain_id") == chain_id and row.get("is_testnet") is is_testnet]
-        return valid, pagination
+        if not isinstance(items, list):
+            raise Scan8004Error("Malformed 8004scan feedback response")
+        valid = [row for row in items if row.get("chain_id") == chain_id and row.get("is_testnet") is is_testnet]
+        return valid, payload.get("total")
 
     async def owned_agents(self, address: str, page: int = 1, limit: int = 100) -> tuple[list[dict], dict]:
         response = await self._get(f"/accounts/{address}/agents", {"page": page, "limit": limit, "sortBy": "created_at", "sortOrder": "desc"})
@@ -533,12 +544,28 @@ async def sync_new_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
     return result
 
 
-async def sync_feedbacks(db, chain_id: int, is_testnet: bool) -> dict:
+async def sync_feedbacks(db, chain_id: int, is_testnet: bool, max_pages: int = 200) -> dict:
     source = "8004scan_feedbacks"
     key = {"source": source, "chain_id": chain_id}
     await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": utc_now()}}, upsert=True)
     try:
-        rows, pagination = await Scan8004Client().list_feedbacks(chain_id, is_testnet)
+        # One page was being synced — 100 entries against 11,680 the catalogue
+        # reports — so almost every agent's detail page showed none. Walk the
+        # pages until the source runs out.
+        client = Scan8004Client()
+        rows: list[dict] = []
+        offset, available = 0, None
+        while offset < max_pages * 100:
+            batch, total = await client.list_feedbacks(chain_id, is_testnet, offset=offset)
+            if total is not None:
+                available = total
+            if not batch:
+                break
+            rows.extend(batch)
+            offset += 100
+            if available is not None and offset >= available:
+                break
+            await asyncio.sleep(0.35)
         for raw in rows:
             feedback_id = str(raw.get("feedback_id") or raw.get("id"))
             await db.scan_feedbacks.update_one(

@@ -1,0 +1,18 @@
+[Unit]
+Description=AgentDock frontend (static production build)
+Documentation=https://github.com/mdlog/agentdock
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mdlog/Project-MDlabs/agentdock/frontend
+Environment=HOST=127.0.0.1
+Environment=PORT=3100
+ExecStart=/usr/bin/python3 /home/mdlog/Project-MDlabs/agentdock/scripts/serve_frontend.py /home/mdlog/Project-MDlabs/agentdock/frontend/build
+Restart=always
+RestartSec=5
+StartLimitBurst=0
+
+[Install]
+WantedBy=default.target

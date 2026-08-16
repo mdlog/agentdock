@@ -1,0 +1,20 @@
+[Unit]
+Description=AgentDock API (FastAPI/uvicorn)
+Documentation=https://github.com/mdlog/agentdock
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mdlog/Project-MDlabs/agentdock/backend
+ExecStart=/home/mdlog/Project-MDlabs/agentdock/backend/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8000
+# MongoDB runs in Docker with restart=unless-stopped, so on a cold boot the API
+# can win the race to start. Restarting rather than failing lets it wait.
+Restart=always
+RestartSec=5
+StartLimitBurst=0
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

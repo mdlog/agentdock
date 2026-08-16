@@ -82,6 +82,40 @@ TESTNET_CHAIN_ID = 97
 USER_AGENT = "AgentDock/1.0 (+https://github.com/mdlog/agentdock)"
 
 
+# What the live agents actually cover, in words a visitor would use. The
+# marketplace headline rotates through these, so it must never name something
+# the catalogue cannot answer: each theme is counted from the tool lists and
+# descriptions of agents whose endpoints answered, and a theme with no agents
+# behind it simply does not appear.
+MARKETPLACE_THEMES = [
+    ("market data", r"price|market|stats|screener|token info|chart"),
+    ("liquidity", r"liquidity|\bpool\b|\blp\b|tick|concentrated"),
+    ("swaps", r"\bswap\b|quote|route|\bdex\b|trade"),
+    ("yield", r"\bapr\b|\bapy\b|yield|vault|farm|harvest|compound|stake|gauge"),
+    ("payments", r"payment|invoice|x402|transfer"),
+    ("lending", r"borrow|repay|collateral|health ?factor|liquidat|\bltv\b|lend"),
+    ("marketing", r"marketing|campaign|ranking|content"),
+    ("bridging", r"bridge|cross[- ]?chain"),
+    ("governance", r"\bvote\b|governance|bribe|proposal"),
+    ("predictions", r"predict|odds|forecast|signal"),
+]
+_THEME_RES = [(label, re.compile(pattern, re.IGNORECASE)) for label, pattern in MARKETPLACE_THEMES]
+
+
+def derive_themes(agents: list[dict]) -> list[dict]:
+    """Count how many live agents cover each theme, most-covered first."""
+    counts: dict[str, int] = {}
+    for agent in agents:
+        corpus = " ".join(
+            [agent.get("name") or "", agent.get("description") or ""]
+            + [f"{c.get('name', '')} {c.get('description', '')}" for c in (agent.get("capabilities") or [])]
+        )
+        for label, expression in _THEME_RES:
+            if expression.search(corpus):
+                counts[label] = counts.get(label, 0) + 1
+    return [{"label": label, "agents": n} for label, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+
 def effective_categories(name: str, description: str, capabilities: list[dict] | None) -> tuple[list[str], str]:
     """Categories for an agent, plus what they were derived from.
 

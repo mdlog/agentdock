@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Search, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api, messageFromError } from "@/lib/api";
-import type { AgentCategory, B402Resource, OnchainAgent } from "@/types";
+import type { AgentCategory, B402Resource, MarketplaceTheme, OnchainAgent } from "@/types";
 import { OnchainAgentCard } from "@/components/OnchainAgentCard";
 import { B402ResourceCard } from "@/components/B402ResourceCard";
 import { CategoryBrowse } from "@/components/CategoryBrowse";
+import { RotatingWord } from "@/components/RotatingWord";
 import { Pagination } from "@/components/Pagination";
 import { useCompare } from "@/hooks/useCompare";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ export default function MarketplacePage() {
   const [offset, setOffset] = useState(0);
   const [payable, setPayable] = useState<B402Resource[]>([]);
   const [categories, setCategories] = useState<AgentCategory[]>([]);
+  const [themes, setThemes] = useState<MarketplaceTheme[]>([]);
   const [category, setCategory] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -67,7 +69,9 @@ export default function MarketplacePage() {
 
   useEffect(() => {
     api.get("/b402/resources").then(r => setPayable(r.data.items)).catch(() => setPayable([]));
-    api.get("/categories").then(r => setCategories(r.data.categories)).catch(() => setCategories([]));
+    api.get("/categories")
+      .then(r => { setCategories(r.data.categories); setThemes(r.data.themes || []); })
+      .catch(() => { setCategories([]); setThemes([]); });
   }, []);
 
   const selectCategory = (key: string | null) => { setCategory(key); setOffset(0); };
@@ -82,7 +86,10 @@ export default function MarketplacePage() {
 
   return <div>
     <section className="search-stage">
-      <div className="stage-copy"><span className="eyebrow"><Sparkles size={14} /> Agent marketplace on BNB Chain</span><h1 data-testid="marketplace-heading">Find the right agent for your next DeFi move.</h1><p data-testid="marketplace-subheading">Real BNB Chain agents, organised by what they do. Pick a category, compare the evidence, and activate the one that fits.</p></div>
+      <div className="stage-copy"><span className="eyebrow"><Sparkles size={14} /> Agent marketplace on BNB Chain</span><h1 data-testid="marketplace-heading">Find the right agent on BNB Chain for{" "}
+        {themes.length > 1
+          ? <RotatingWord words={themes.map(theme => theme.label)} />
+          : <span>DeFi</span>}</h1><p data-testid="marketplace-subheading">Every categorised agent in the registry has been called to see whether it answers. Pick a job, compare the evidence, and activate the one that fits.</p></div>
       <div className="search-box"><Search size={21} /><Input data-testid="marketplace-search-input" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search agents by name or what they do" /><kbd>⌘ K</kbd></div>
       <div className="trust-row" data-testid="marketplace-stats"><span><strong data-testid="stat-payable-count">{payable.length}</strong> hireable now</span><span><strong data-testid="stat-onchain-count">{total.toLocaleString()}</strong> onchain agents</span><span><strong>BNB</strong> Chain mainnet</span></div>
     </section>

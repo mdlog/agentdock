@@ -92,6 +92,18 @@ a { color: inherit; text-decoration: none; }
 .payment-action{display:flex;flex-direction:column;gap:10px}
 .payment-action button{width:100%}
 .hire-page .profile-price strong{font-size:15px}.hire-page .evidence-column>.plain-section:last-of-type{border-bottom:0;margin-bottom:0;padding-bottom:14px}.brief-list code,.blocked-payment code{font-family:ui-monospace,monospace;font-size:12.5px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;padding:1px 6px}.action-list{display:flex;flex-direction:column;gap:6px;margin-bottom:4px}.action-list button{text-align:left;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:9px 11px;cursor:pointer;transition:border-color .15s,background .15s}.action-list button:hover{background:white;border-color:#94a3b8}.action-list button.selected{background:white;border-color:var(--teal);box-shadow:0 0 0 2px #ccfbf1}.action-list strong{display:flex;align-items:center;gap:7px;font-size:12px;font-family:ui-monospace,monospace;color:var(--ink)}.action-list em{font-style:normal;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--teal);background:#ccfbf1;border-radius:3px;padding:2px 5px;font-family:'Manrope',sans-serif}.action-list span{display:block;margin-top:3px;font-size:11px;line-height:1.45;color:#526174}.action-note{margin:8px 0 0;font-size:10.5px;line-height:1.45;color:#64748b}.objective-suggestions{display:flex;flex-direction:column;gap:6px;margin-top:10px}.objective-suggestions>span{font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:#94a3b8}.objective-suggestions button{text-align:left;font-size:11.5px;line-height:1.45;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;cursor:pointer;transition:border-color .15s,background .15s}.objective-suggestions button:hover{background:white;border-color:var(--teal)}.next-step{margin:10px 0 0;font-size:10.5px;line-height:1.45;color:#64748b}.compare-loading{padding:20px 0}/* A control, not a card grid: one row, sized to its content. Each label plus   its count is the whole message — what the source IS gets stated by the   section kicker immediately below. */
+/* A vertical hand-off: the new word drops in from above while the old one
+   falls away below, so the line reads as one word being replaced. The sizer
+   reserves the widest word's width so nothing after it shifts. */
+.rotating-word{position:relative;display:inline-grid;grid-auto-rows:1fr;overflow:hidden;vertical-align:bottom;color:var(--teal)}
+.rotating-word>span{grid-area:1/1;white-space:nowrap}
+.rotating-sizer{visibility:hidden;pointer-events:none}
+@media(prefers-reduced-motion:no-preference){
+  .rotating-in{animation:word-in .75s cubic-bezier(.22,1,.36,1) both}
+  .rotating-out{animation:word-out .75s cubic-bezier(.22,1,.36,1) both}
+  @keyframes word-in{from{transform:translateY(-105%);opacity:0}to{transform:none;opacity:1}}
+  @keyframes word-out{from{transform:none;opacity:1}to{transform:translateY(105%);opacity:0}}
+}
 .source-switch{display:flex}
 .source-switch>button{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:#64748b;background:#f1f5f9;border:1px solid transparent;height:40px;padding:0 13px;cursor:pointer;transition:color .15s,background .15s,border-color .15s}
 .source-switch>button:first-child{border-radius:7px 0 0 7px}

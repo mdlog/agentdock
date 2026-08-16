@@ -2,6 +2,7 @@ export type Metrics = { success_rate: number; uptime_pct: number; latency_sec: n
 export type Agent = { id: string; name: string; tagline: string; description: string; category: string; capabilities: string[]; price_usd: number; status: "active" | "offline"; metrics: Metrics; identity: { chain_id: number; registry: string; agent_id: number; metadata_verified: boolean; endpoint_verified: boolean; source: string }; output_schema: string[]; updated_at: string };
 export type AgentAction = { name: string; description: string; uses_wallet: boolean };
 export type AgentActions = { actions: AgentAction[]; transport?: string | null; declared_total: number; activatable: boolean };
+export type MarketplaceTheme = { label: string; agents: number };
 export type AgentCategory = { key: string; label: string; blurb: string; count: number; ready?: number; payable?: number };
 export type B402Resource = { id: string; resource: string; host: string; type: string; description: string; x402_version: number; listed_assets: string[]; pay_to: string[]; categories: string[]; source: string; source_label: string; synced_at: string };
 export type PaymentTerms = { network: string; chain_id: number; asset: string; asset_name: string; amount_raw: string; amount_tokens: number; decimals: number; pay_to: string; max_timeout_seconds: number; transfer_method: string };

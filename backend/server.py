@@ -15,7 +15,7 @@ import b402
 from guards import client_key, icon_limiter, require_operator, run_limiter, task_limiter
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import AuditEvent, AuthorizeRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
-from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, effective_categories, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks, sync_new_agents
+from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, derive_themes, detail_projection, effective_categories, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks, sync_new_agents
 from icon_proxy import get_agent_icon
 
 
@@ -389,7 +389,15 @@ async def list_categories(network: str = "mainnet"):
         items.append({"key": cat["key"], "label": cat["label"], "blurb": cat["blurb"],
                       "count": count, "ready": ready, "payable": payable})
     total_tagged = await db.scan_agents.count_documents({"chain_id": chain_id, "categories": {"$ne": []}})
-    return {"categories": items, "total_categorized": total_tagged, "network": network, "chain_id": chain_id}
+    # What the working agents cover, for the headline to rotate through. Served
+    # from the same request the page already makes, and counted from live
+    # agents only — the headline should never name a job nothing here can do.
+    live = await db.scan_agents.find(
+        {"chain_id": chain_id, "activatable": True},
+        {"_id": 0, "name": 1, "description": 1, "capabilities": 1},
+    ).to_list(300)
+    return {"categories": items, "themes": derive_themes(live), "total_categorized": total_tagged,
+            "network": network, "chain_id": chain_id}
 
 
 @api.get("/onchain/agents", response_model=ScanAgentList, tags=["agents"])

@@ -104,6 +104,11 @@ class ScanAgent(BaseModel):
     endpoint_checked: bool = False
     # live | auth | payment | dead | error | none — the verdict of a real probe,
     # so the card can say why an agent cannot be activated instead of guessing.
+    # What a live agent declares it can do, taken from its own tool list.
+    capabilities: list[dict[str, str]] = Field(default_factory=list)
+    # Read-only openers drawn from those capabilities, so a newcomer is not
+    # handed an empty box for an agent they have never met.
+    suggested_objectives: list[str] = Field(default_factory=list)
     endpoint_status: str | None = None
     endpoint_note: str | None = None
     endpoint_kind: str | None = None

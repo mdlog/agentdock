@@ -477,6 +477,58 @@ async def _probe(kind: str, url: str, token_id: int | None = None) -> tuple[str,
         return "dead", f"{type(exc).__name__}: {exc}"
 
 
+async def fetch_capabilities(kind: str, url: str, token_id: int | None = None) -> list[dict[str, str]]:
+    """What this agent declares it can do, in its own words.
+
+    Only called for endpoints that already probed live — a handful — so the cost
+    is negligible. Two uses, both of which need the agent's real vocabulary
+    rather than ours: a visitor deciding between agents can see what each one
+    actually offers, and the hire form can suggest an opening request instead of
+    handing a newcomer an empty box.
+    """
+    try:
+        if kind != "mcp":
+            return []
+        target = substitute_agent_id(url, token_id)
+        await _assert_public_https(target)
+        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT, follow_redirects=False) as client:
+            init = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "agentdock", "version": "1.0"}}})
+            session = init.headers.get("mcp-session-id")
+            listed = await _post(client, target, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, session)
+            tools = _unwrap(_sse_or_json(listed.text), "tools/list").get("tools") or []
+        return [
+            {"name": str(tool.get("name") or "")[:80],
+             "description": str(tool.get("description") or "")[:200]}
+            for tool in tools if tool.get("name")
+        ][:40]
+    except (AgentCallError, AgentPaymentRequired, httpx.HTTPError, OSError, ValueError):
+        return []
+
+
+def suggested_objectives(capabilities: list[dict[str, str]]) -> list[str]:
+    """Openers a newcomer can click instead of composing prose.
+
+    Every suggestion is a tool's own description, so we are never putting words
+    in an agent's mouth — and every one passes the same mutation gate the
+    runtime uses, so the marketplace never proposes borrowing, swapping or
+    signing on the user's behalf.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for cap in capabilities:
+        if _safe_readonly_call({"name": cap.get("name", ""), "inputSchema": {}}) is None:
+            continue
+        text = " ".join((cap.get("description") or "").split())
+        if len(text) < 20 or text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        out.append(text[:180])
+        if len(out) == 3:
+            break
+    return out
+
+
 async def call_agent(kind: str, url: str, objective: str, token_id: int | None = None, wallet: str | None = None) -> dict[str, Any]:
     if kind == "mcp":
         return await call_mcp(substitute_agent_id(url, token_id), objective, wallet)

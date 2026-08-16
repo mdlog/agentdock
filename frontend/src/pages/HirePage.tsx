@@ -29,6 +29,9 @@ type HireView = {
   // from the URL alone told the user something nobody had checked.
   runnable: boolean;
   blockedReason?: string;
+  // The agent's own read-only tool descriptions, offered as openers.
+  suggestions: string[];
+  toolCount: number;
 };
 
 export default function HirePage() {
@@ -54,6 +57,7 @@ export default function HirePage() {
             iconName: `${a.chain_id}-${a.token_id}-${a.name}`,
             iconSrc: a.has_source_icon ? `${process.env.REACT_APP_BACKEND_URL}/api/onchain/agents/mainnet/${a.token_id}/icon` : undefined,
             runnable: !unusable, blockedReason: unusable?.hint,
+            suggestions: a.suggested_objectives || [], toolCount: (a.capabilities || []).length,
           });
         })
         .catch(e => setLoadError(messageFromError(e)));
@@ -62,7 +66,7 @@ export default function HirePage() {
         .then(r => {
           const b = (r.data.items as B402Resource[]).find(i => i.id === resourceId);
           if (!b) { setLoadError("This service is no longer listed in the b402 catalog."); return; }
-          setView({ paid: true, title: b.host, description: b.description, tags: [b.type?.toUpperCase() || "HTTP", `x402 v${b.x402_version}`, "BNB Chain"], endpointLabel: b.resource, iconName: b.resource, runnable: true });
+          setView({ paid: true, title: b.host, description: b.description, tags: [b.type?.toUpperCase() || "HTTP", `x402 v${b.x402_version}`, "BNB Chain"], endpointLabel: b.resource, iconName: b.resource, runnable: true, suggestions: [], toolCount: 0 });
         })
         .catch(e => setLoadError(messageFromError(e)));
     }
@@ -125,7 +129,12 @@ export default function HirePage() {
       <aside className="task-panel" data-testid="hire-composer">
         <div className="task-panel-heading"><span><Zap size={14} /> {view.paid ? "Hire agent" : "Activate agent"}</span><strong>{view.paid ? "Pay per call" : "Free"}</strong></div>
         <label htmlFor="objective">What should the agent do?</label>
-        <Textarea id="objective" data-testid="hire-objective-input" value={objective} onChange={e => setObjective(e.target.value)} rows={6} placeholder="Describe the request. It is sent to the agent as its query." />
+        <Textarea id="objective" data-testid="hire-objective-input" value={objective} onChange={e => setObjective(e.target.value)} rows={5} placeholder="Describe the request. It is sent to the agent as its query." />
+        {view.suggestions.length > 0 && <div className="objective-suggestions" data-testid="hire-suggestions">
+          <span>Or start with something this agent offers:</span>
+          {view.suggestions.map((s, i) =>
+            <button type="button" key={i} data-testid={`hire-suggestion-${i}`} onClick={() => setObjective(s)}>{s}</button>)}
+        </div>}
         <div className="transaction-preview">
           <h3>Before you run</h3>
           <div><span>Network</span><strong>BNB Chain · 56</strong></div>

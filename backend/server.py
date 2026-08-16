@@ -323,8 +323,16 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
                         status, note = await agent_client.probe_endpoint(kind, url, token_id)
                         await asyncio.sleep(0.25)
                 verdict_cache[cache_key] = (status, note)
-            return agent, {"endpoint_kind": kind, "agent_endpoint": url, "endpoint_status": status,
-                           "endpoint_note": note[:300], "activatable": status == "live"}
+            update = {"endpoint_kind": kind, "agent_endpoint": url, "endpoint_status": status,
+                      "endpoint_note": note[:300], "activatable": status == "live"}
+            if status == "live":
+                # Ask the handful of working agents what they can do. Their own
+                # tool list is the only honest basis for telling a visitor what
+                # this agent offers, and for suggesting a first request.
+                caps = await agent_client.fetch_capabilities(kind, url, token_id)
+                update["capabilities"] = caps
+                update["suggested_objectives"] = agent_client.suggested_objectives(caps)
+            return agent, update
 
         for completed in asyncio.as_completed([verify(a, e) for a, e in resolved]):
             agent, update = await completed

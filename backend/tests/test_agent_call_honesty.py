@@ -600,3 +600,43 @@ def test_wallet_never_leaks_into_a_mutating_tool():
         "required": ["userAddress"], "properties": {"userAddress": {"type": "string"}}}}
 
     assert agent_client._safe_readonly_call(tool, wallet="0x" + "a" * 40) is None
+
+
+# --- openers must come from the agent, and must never propose a mutation -----
+
+def test_suggestions_use_the_agents_own_words():
+    caps = [{"name": "get_status", "description": "Current picture: health factor, risk band and stress curve."}]
+
+    assert agent_client.suggested_objectives(caps) == ["Current picture: health factor, risk band and stress curve."]
+
+
+def test_a_mutating_tool_is_never_suggested():
+    """The marketplace must not propose borrowing or signing on a user's behalf."""
+    caps = [
+        {"name": "borrow", "description": "Borrow a token from the lending protocol on a chain."},
+        {"name": "build_swap_calldata", "description": "Build wallet-ready swap calldata to sign and broadcast."},
+        {"name": "get_pool_stats", "description": "Get top pools sorted by TVL, volume, fees, or APR."},
+    ]
+
+    assert agent_client.suggested_objectives(caps) == ["Get top pools sorted by TVL, volume, fees, or APR."]
+
+
+def test_at_most_three_suggestions_and_no_duplicates():
+    caps = [{"name": f"get_thing_{i}", "description": "Get the same overview of everything available."} for i in range(6)]
+    caps += [{"name": "list_pools", "description": "List every pool with its current liquidity depth."}]
+
+    suggestions = agent_client.suggested_objectives(caps)
+
+    assert len(suggestions) == 2
+    assert len(set(suggestions)) == 2
+
+
+def test_useless_descriptions_are_skipped():
+    """A tool described as "get" gives a newcomer nothing to click."""
+    caps = [{"name": "get_x", "description": "Get."}, {"name": "get_y", "description": ""}]
+
+    assert agent_client.suggested_objectives(caps) == []
+
+
+def test_an_agent_with_no_capabilities_offers_nothing_rather_than_inventing():
+    assert agent_client.suggested_objectives([]) == []

@@ -973,3 +973,20 @@ async def test_a_data_part_answer_is_relayed_without_envelope_boilerplate(monkey
 
     assert "607.46" in result["output"]
     assert "contextId" not in result["output"]
+
+
+def test_the_browse_grid_lists_a_shared_gateway_once():
+    """230 registrations on one gateway answer identically: the default browse
+    shows the service once with its registration count, counts services in
+    every ready figure, and keeps the other registrations reachable by search."""
+    import inspect
+    import server
+
+    listing = inspect.getsource(server.list_onchain_agents)
+    assert '"endpoint_primary": {"$ne": False}' in listing
+    # The collapse only applies to the default browse — search still finds every
+    # registration by name.
+    assert 'sort == "ready" and not search' in listing
+
+    for fn in (server.marketplace_pulse, server.marketplace_verified, server.list_categories):
+        assert '"endpoint_primary": {"$ne": False}' in inspect.getsource(fn), fn.__name__

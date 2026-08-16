@@ -46,6 +46,13 @@ export const OnchainAgentCard = ({ agent, network, compare }: {
         {agent.x402_supported && <Badge data-testid={`onchain-x402-${agent.token_id}`} className="x402-badge"><Zap size={10} /> x402 claim</Badge>}
       </div>
 
+      {/* 230 registrations can share one gateway and answer identically. The
+          grid lists that service once; this line is where the card admits it. */}
+      {(agent.endpoint_peer_count ?? 0) > 1 && (
+        <span className="peer-badge" data-testid={`onchain-shared-${agent.token_id}`}>
+          Shared gateway · one service answering for {agent.endpoint_peer_count} registrations
+        </span>
+      )}
       <p data-testid={`onchain-description-${agent.token_id}`}>{agent.description}</p>
       <div className="protocol-list" data-testid={`onchain-protocols-${agent.token_id}`}>
         {agent.supported_protocols.length ? agent.supported_protocols.map(p => <span key={p}>{p}</span>) : <span>No protocol declared</span>}

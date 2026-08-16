@@ -70,6 +70,7 @@ async def startup() -> None:
     # The default browse order. Without these the readiness sort scans the
     # whole 134k collection on every page.
     await db.scan_agents.create_index([("chain_id", 1), ("activatable", -1), ("total_score", -1)])
+    await db.scan_agents.create_index([("chain_id", 1), ("endpoint_primary", 1)])
     await db.scan_agents.create_index([("chain_id", 1), ("categories", 1), ("activatable", -1), ("total_score", -1)])
     await db.sync_runs.create_index([("source", 1), ("chain_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("feedback_id", 1)], unique=True)
@@ -254,6 +255,41 @@ ENDPOINT_VERDICT_TTL_HOURS = 12
 DETAIL_CACHE_HOURS = 6
 
 
+async def mark_endpoint_groups(chain_id: int = 56) -> dict:
+    """One listed card per distinct service; the rest labelled as its peers.
+
+    230 registrations by 230 different owners share one gateway URL and answer
+    every hire identically — real registrations, one service. A browse grid
+    showing 230 copies of that service overstates supply by two orders of
+    magnitude, which is the exact inflation this product exists to correct.
+    The service is listed once (its highest-scored registration), carries how
+    many registrations it serves, and every "ready" figure counts services.
+    """
+    marked = groups = 0
+    async for group in db.scan_agents.aggregate([
+            {"$match": {"chain_id": chain_id, "activatable": True}},
+            {"$group": {"_id": "$agent_endpoint", "n": {"$sum": 1}}}]):
+        url = group["_id"]
+        if not url:
+            continue
+        best = await db.scan_agents.find_one(
+            {"chain_id": chain_id, "activatable": True, "agent_endpoint": url},
+            {"_id": 0, "token_id": 1}, sort=[("total_score", -1), ("token_id", 1)])
+        await db.scan_agents.update_many(
+            {"chain_id": chain_id, "activatable": True, "agent_endpoint": url},
+            {"$set": {"endpoint_peer_count": group["n"], "endpoint_primary": False}})
+        await db.scan_agents.update_one(
+            {"chain_id": chain_id, "token_id": best["token_id"]},
+            {"$set": {"endpoint_primary": True}})
+        groups += 1
+        marked += group["n"]
+    # An agent that lost its verdict must not keep a stale group label.
+    await db.scan_agents.update_many(
+        {"chain_id": chain_id, "activatable": {"$ne": True}, "endpoint_primary": {"$exists": True}},
+        {"$unset": {"endpoint_peer_count": "", "endpoint_primary": ""}})
+    return {"services": groups, "registrations": marked}
+
+
 async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
     """Resolve callable endpoints for categorized agents and flag the activatable
     ones. Bounded to the categorized set (a few hundred) — those are what the
@@ -402,7 +438,9 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
             # end is indistinguishable from one that has hung.
             if checked % 20 == 0:
                 await db.sync_runs.update_one(key, {"$set": {"checked": checked, "activatable": activatable, "total": len(resolved)}})
+        groups = await mark_endpoint_groups(chain_id)
         result = {"status": "success", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked,
+                  "distinct_services": groups["services"],
                   "activatable": activatable, "unknown": unknown, "completed_at": now_iso()}
     except Exception as exc:
         result = {"status": "degraded", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked, "activatable": activatable, "error": str(exc), "failed_at": now_iso()}
@@ -432,12 +470,13 @@ async def marketplace_verified(network: str = "mainnet", limit: int = Query(defa
     """
     chain_id = 97 if network == "testnet" else 56
     items = await db.scan_agents.find(
-        {"chain_id": chain_id, "activatable": True},
+        {"chain_id": chain_id, "activatable": True, "endpoint_primary": {"$ne": False}},
         {"_id": 0, "id": 1, "token_id": 1, "name": 1, "description": 1, "endpoint_kind": 1,
          "categories": 1, "capabilities": 1, "total_score": 1, "rank": 1, "has_source_icon": 1, "chain_id": 1},
     ).sort("total_score", -1).to_list(limit)
     return {"items": [{**a, "tool_count": len(a.pop("capabilities", []) or [])} for a in items],
-            "total_live": await db.scan_agents.count_documents({"chain_id": chain_id, "activatable": True}),
+            "total_live": await db.scan_agents.count_documents(
+                {"chain_id": chain_id, "activatable": True, "endpoint_primary": {"$ne": False}}),
             # Shown beside the live count, because the ratio is the point: the
             # scarcity is what makes finding these worth a marketplace.
             "catalogue_total": await db.scan_agents.count_documents({"chain_id": chain_id})}
@@ -459,7 +498,10 @@ async def marketplace_pulse(network: str = "mainnet"):
         "catalogue_total": await db.scan_agents.count_documents({"chain_id": chain_id}),
         "registered_today": await db.scan_agents.count_documents({"chain_id": chain_id, "created_at": {"$gte": midnight}}),
         "endpoints_verified": await db.scan_agents.count_documents({"chain_id": chain_id, "endpoint_status": {"$exists": True}}),
-        "agents_live": await db.scan_agents.count_documents({"chain_id": chain_id, "activatable": True}),
+        # Distinct services, not registrations: 230 rows on one gateway answer
+        # identically, and the pulse should not count one answer 230 times.
+        "agents_live": await db.scan_agents.count_documents(
+            {"chain_id": chain_id, "activatable": True, "endpoint_primary": {"$ne": False}}),
         "synced_at": (head or {}).get("completed_at"),
         "chain_id": chain_id,
     }
@@ -478,7 +520,8 @@ async def list_categories(network: str = "mainnet"):
         # A registration count sets an expectation the category may not meet. The
         # ready count is the one that predicts whether a visitor can do anything
         # here, so both are published and the card leads with the honest one.
-        ready = await db.scan_agents.count_documents({**scope, "activatable": True})
+        ready = await db.scan_agents.count_documents(
+            {**scope, "activatable": True, "endpoint_primary": {"$ne": False}})
         payable = await db.b402_resources.count_documents({"categories": cat["key"]})
         items.append({"key": cat["key"], "label": cat["label"], "blurb": cat["blurb"],
                       "count": count, "ready": ready, "payable": payable})
@@ -534,6 +577,12 @@ async def list_onchain_agents(
     # is hidden and the totals are unchanged — a catalogue where 435 of 442
     # probed endpoints are dead simply should not lead with them.
     spec = [("activatable", -1), ("total_score", -1)] if sort == "ready" else sort_map.get(sort, sort_map["score"])
+    if sort == "ready" and not search:
+        # In the default browse, a shared gateway appears once. Its other
+        # registrations stay real — findable by search, category listings under
+        # other sorts, and direct links — but 230 cards that answer identically
+        # are one service, and the grid says so instead of multiplying it.
+        query["endpoint_primary"] = {"$ne": False}
     # total is the number of matching rows, not the size of this page: the UI
     # needs it to render pagination over a catalogue it never receives whole.
     # count_documents on an unbounded match walks every match. The exact figure
@@ -558,7 +607,8 @@ async def list_onchain_agents(
         capped = total >= COUNT_CEILING
     # Published alongside the total so the ordering is legible rather than
     # mysterious: the UI can say how many of these matches are actually usable.
-    ready_total = await db.scan_agents.count_documents({**query, "activatable": True}, limit=COUNT_CEILING)
+    ready_total = await db.scan_agents.count_documents(
+        {**query, "activatable": True, "endpoint_primary": {"$ne": False}}, limit=COUNT_CEILING)
     items = await db.scan_agents.find(query, {"_id": 0, "raw_8004scan": 0}).sort(spec).skip(offset).limit(limit).to_list(limit)
     return ScanAgentList(items=items, total=total, ready_total=ready_total, total_capped=capped,
                          chain_id=chain_id, is_testnet=is_testnet, offset=offset, limit=limit)
@@ -683,6 +733,9 @@ def _endpoint_verdict(record: dict | None) -> dict | None:
         # actually went to once the id template and agent card were resolved.
         "declared_endpoint": record.get("agent_endpoint"),
         "called_url": record.get("endpoint_called"),
+        # >1 means this exact endpoint answers for that many registrations, so
+        # the verdict is about the service, not this token in particular.
+        "peer_count": record.get("endpoint_peer_count"),
     }
 
 

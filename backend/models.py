@@ -123,6 +123,11 @@ class ScanAgent(BaseModel):
     is_verified: bool
     total_score: float | None = None
     rank: int | None = None
+    # How many activatable registrations share this exact endpoint, and whether
+    # this row is the one the browse grid lists for that service. 230 clones of
+    # one gateway are one service; the card says so instead of multiplying it.
+    endpoint_peer_count: int | None = None
+    endpoint_primary: bool | None = None
     health_score: float | None = None
     total_feedbacks: int = 0
     average_score: float | None = None

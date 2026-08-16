@@ -79,3 +79,7 @@ def client_key(request: Request) -> str:
 # the marketplace would ever reach.
 task_limiter = RateLimiter(limit=int(os.environ.get("RATE_LIMIT_TASKS", "20")), window_seconds=60)
 run_limiter = RateLimiter(limit=int(os.environ.get("RATE_LIMIT_RUNS", "30")), window_seconds=60)
+# Each icon miss is an outbound fetch to a host named in on-chain metadata, so
+# the ceiling here bounds concurrent bytes in flight, not just request count.
+# Set high enough that a full page of 60 cards loads twice over.
+icon_limiter = RateLimiter(limit=int(os.environ.get("RATE_LIMIT_ICONS", "180")), window_seconds=60)

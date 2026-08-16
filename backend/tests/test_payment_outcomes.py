@@ -118,7 +118,8 @@ def test_quoted_validity_window_is_never_blank():
     None that renders as "Valid for: s after signing"."""
     terms = b402.describe_terms({
         "network": b402.BSC_NETWORK, "amount": "70000000000000000", "payTo": "0x" + "1" * 40,
-        "asset": "0x" + "2" * 40, "extra": {"decimals": 18, "name": "United Stables", "assetTransferMethod": "eip3009"},
+        "asset": "0xcE24439F2D9C6a2289F741120FE202248B666666",
+        "extra": {"decimals": 18, "name": "United Stables", "assetTransferMethod": "eip3009"},
     })
 
     assert terms["max_timeout_seconds"] == b402.DEFAULT_VALIDITY_SECONDS
@@ -126,8 +127,70 @@ def test_quoted_validity_window_is_never_blank():
 
 def test_merchant_validity_window_is_respected_when_given():
     terms = b402.describe_terms({
-        "network": b402.BSC_NETWORK, "amount": "1000", "payTo": "0x" + "1" * 40, "asset": "0x" + "2" * 40,
+        "network": b402.BSC_NETWORK, "amount": "1000", "payTo": "0x" + "1" * 40,
+        "asset": "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d",
         "maxTimeoutSeconds": 300, "extra": {"decimals": 18, "name": "USD1", "assetTransferMethod": "eip3009"},
     })
 
     assert terms["max_timeout_seconds"] == 300
+
+
+# --- the divisor that turns a signature into a human number ------------------
+
+USD1 = "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
+
+
+def _accept(**over):
+    base = {"network": b402.BSC_NETWORK, "asset": USD1, "payTo": "0x" + "1" * 40,
+            "amount": "70000000000000000",
+            "extra": {"decimals": 18, "name": "World Liberty Financial USD", "assetTransferMethod": "eip3009"}}
+    base.update(over)
+    return base
+
+
+def test_inflated_decimals_cannot_smuggle_a_large_transfer_past_the_ceiling():
+    """The attack this exists to stop: the signature authorises a raw base-unit
+    value, and only `decimals` turns it into the figure a human approves. A
+    merchant claiming 30 decimals on an 18-decimal token would display
+    "0.001" for a transfer of one million USD1."""
+    hostile = _accept(amount=str(10**24), extra={"decimals": 30, "name": "USD1", "assetTransferMethod": "eip3009"})
+
+    with pytest.raises(b402.PaymentRefused):
+        b402.describe_terms(hostile)
+
+
+def test_the_displayed_amount_uses_the_contracts_own_decimals():
+    terms = b402.describe_terms(_accept(extra={"decimals": 6, "name": "lies", "assetTransferMethod": "eip3009"}))
+
+    assert terms["decimals"] == 18
+    assert terms["amount_tokens"] == pytest.approx(0.07)
+
+
+def test_an_unrecognised_settlement_token_is_refused():
+    """A merchant must not be able to name a token of its own making."""
+    with pytest.raises(b402.PaymentRefused) as caught:
+        b402.describe_terms(_accept(asset="0x" + "de" * 20))
+
+    assert "does not recognise" in str(caught.value)
+
+
+def test_the_asset_name_shown_comes_from_the_allowlist():
+    terms = b402.describe_terms(_accept(extra={"decimals": 18, "name": "Definitely Not A Scam", "assetTransferMethod": "eip3009"}))
+
+    assert terms["asset_name"] == "World Liberty Financial USD"
+    assert terms["asset_symbol"] == "USD1"
+
+
+def test_address_casing_does_not_defeat_the_allowlist():
+    terms = b402.describe_terms(_accept(asset=USD1.lower()))
+
+    assert terms["decimals"] == 18
+
+
+def test_a_known_asset_is_preferred_over_an_unverifiable_one():
+    challenge = {"accepts": [
+        {"network": b402.BSC_NETWORK, "asset": "0x" + "ab" * 20, "extra": {"assetTransferMethod": "eip3009"}},
+        _accept(),
+    ]}
+
+    assert b402.select_bsc_eip3009(challenge)["asset"] == USD1

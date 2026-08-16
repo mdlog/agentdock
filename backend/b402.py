@@ -42,6 +42,21 @@ DEFAULT_VALIDITY_SECONDS = 60
 
 USER_AGENT = "AgentDock/1.0 (+https://github.com/mdlog/agentdock)"
 
+# Settlement assets AgentDock will present for signing, with the decimals read
+# from each contract on BNB Chain — not from the merchant.
+#
+# The signature authorises a raw base-unit value; only `decimals` turns that
+# into the figure a human approves. A merchant that declares 30 decimals on an
+# 18-decimal token shows the user "0.000001" for a transfer of one million,
+# and the spend ceiling below waves it through. Nothing about the quote is
+# trustworthy, so the divisor cannot come from it.
+#
+# Verified on-chain via decimals(): USD1 18, U 18.
+BSC_SETTLEMENT_ASSETS = {
+    "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d": {"symbol": "USD1", "name": "World Liberty Financial USD", "decimals": 18},
+    "0xce24439f2d9c6a2289f741120fe202248b666666": {"symbol": "U", "name": "United Stables", "decimals": 18},
+}
+
 TRANSFER_WITH_AUTHORIZATION_TYPES = {
     "TransferWithAuthorization": [
         {"name": "from", "type": "address"},
@@ -116,7 +131,24 @@ def select_bsc_eip3009(challenge: dict[str, Any]) -> dict[str, Any]:
     usable = [a for a in on_bsc if (a.get("extra") or {}).get("assetTransferMethod") == "eip3009"]
     if not usable:
         raise PaymentRefused("This resource only accepts permit2 on BNB Chain, which needs a separate approval transaction")
-    return usable[0]
+    # Prefer an option in an asset we can verify; refusing here beats refusing
+    # later in describe_terms, which would discard a usable alternative.
+    known = [a for a in usable if str(a.get("asset") or "").strip().lower() in BSC_SETTLEMENT_ASSETS]
+    return (known or usable)[0]
+
+
+def trusted_asset(accept: dict[str, Any]) -> dict[str, Any]:
+    """The allow-listed asset this quote settles in, or a refusal.
+
+    Doubles as a check on the contract itself: an unknown address is refused
+    rather than signed for, so a merchant cannot name a token of its own making.
+    """
+    address = str(accept.get("asset") or "").strip().lower()
+    known = BSC_SETTLEMENT_ASSETS.get(address)
+    if not known:
+        raise PaymentRefused(
+            "This merchant settles in a token AgentDock does not recognise, so its terms cannot be verified")
+    return known
 
 
 def describe_terms(accept: dict[str, Any]) -> dict[str, Any]:
@@ -127,7 +159,8 @@ def describe_terms(accept: dict[str, Any]) -> dict[str, Any]:
         amount = int(raw_amount)
     except ValueError as exc:
         raise B402Error("Merchant quoted an unreadable amount") from exc
-    decimals = int(extra.get("decimals") or 18)
+    asset = trusted_asset(accept)
+    decimals = asset["decimals"]
     tokens = amount / (10 ** decimals)
     if tokens > MAX_AMOUNT_TOKENS:
         raise PaymentRefused(f"Merchant asked for {tokens:g} tokens, above the {MAX_AMOUNT_TOKENS:g} ceiling AgentDock will present for signing")
@@ -135,7 +168,10 @@ def describe_terms(accept: dict[str, Any]) -> dict[str, Any]:
         "network": accept.get("network"),
         "chain_id": BSC_CHAIN_ID,
         "asset": accept.get("asset"),
-        "asset_name": extra.get("name"),
+        # The name shown is the one the contract carries, not the one the
+        # merchant supplied alongside it.
+        "asset_name": asset["name"],
+        "asset_symbol": asset["symbol"],
         "amount_raw": raw_amount,
         "amount_tokens": tokens,
         "decimals": decimals,

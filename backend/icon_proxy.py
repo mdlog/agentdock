@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from datetime import datetime, timezone
 import ipaddress
 import socket
 from urllib.parse import urlparse
@@ -9,6 +10,8 @@ from bson.binary import Binary
 
 
 MAX_ICON_BYTES = 1_000_000
+# Ceiling for one fetch including DNS, which httpx timeouts do not cover.
+FETCH_WALL_CLOCK = 20.0
 ALLOWED_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 
@@ -43,6 +46,39 @@ async def _public_https_url(value: str | None) -> str | None:
     return value
 
 
+async def _fetch_icon(url: str) -> tuple[bytes, str] | None:
+    """Download an icon, refusing to hold more than MAX_ICON_BYTES in memory.
+
+    These URLs come from on-chain metadata that anyone can register, so the
+    limit has to bound what we *read*, not what we keep. Reading the body first
+    and measuring it afterwards let a host stream indefinitely: a deliberately
+    hostile registration buffered two gigabytes into this process in 42 seconds
+    against a one-megabyte cap, because httpx's read timeout applies per chunk
+    and never fires while data keeps arriving.
+    """
+    headers = {"Accept": "image/png,image/jpeg,image/webp,image/gif", "User-Agent": "AgentDock-IconProxy/1.0"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5), follow_redirects=False) as client:
+        async with client.stream("GET", url, headers=headers) as response:
+            if response.status_code != 200:
+                return None
+            content_type = response.headers.get("content-type", "").split(";")[0].lower()
+            if content_type not in ALLOWED_TYPES:
+                return None
+            # A truthful Content-Length saves us reading anything at all.
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > MAX_ICON_BYTES:
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_ICON_BYTES:
+                    return None
+                chunks.append(chunk)
+    content = b"".join(chunks)
+    return (content, content_type) if content else None
+
+
 async def get_agent_icon(db, chain_id: int, token_id: int) -> tuple[bytes, str, bool]:
     agent = await db.scan_agents.find_one(
         {"chain_id": chain_id, "token_id": token_id},
@@ -57,21 +93,33 @@ async def get_agent_icon(db, chain_id: int, token_id: int) -> tuple[bytes, str, 
         {"_id": 0, "content": 1, "content_type": 1},
     )
     if cached:
-        return bytes(cached["content"]), cached["content_type"], True
+        content = bytes(cached["content"])
+        # An empty body is a remembered failure, not an icon.
+        if content:
+            return content, cached["content_type"], True
+        return fallback_svg(chain_id, token_id), "image/svg+xml", False
 
     safe_url = await _public_https_url(source_url)
     if safe_url:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5), follow_redirects=False) as client:
-                response = await client.get(safe_url, headers={"Accept": "image/png,image/jpeg,image/webp,image/gif", "User-Agent": "AgentDock-IconProxy/1.0"})
-            content_type = response.headers.get("content-type", "").split(";")[0].lower()
-            if response.status_code == 200 and content_type in ALLOWED_TYPES and 0 < len(response.content) <= MAX_ICON_BYTES:
-                await db.scan_agent_icons.update_one(
-                    {"chain_id": chain_id, "token_id": token_id},
-                    {"$set": {"source_hash": source_hash, "content": Binary(response.content), "content_type": content_type}},
-                    upsert=True,
-                )
-                return response.content, content_type, True
-        except (httpx.HTTPError, ValueError):
-            pass
+            icon = await asyncio.wait_for(_fetch_icon(safe_url), timeout=FETCH_WALL_CLOCK)
+        except (httpx.HTTPError, ValueError, asyncio.TimeoutError, TimeoutError):
+            icon = None
+        if icon:
+            content, content_type = icon
+            await db.scan_agent_icons.update_one(
+                {"chain_id": chain_id, "token_id": token_id},
+                {"$set": {"source_hash": source_hash, "content": Binary(content), "content_type": content_type}},
+                upsert=True,
+            )
+            return content, content_type, True
+        # Remember the failure. Without this, every request re-downloads from a
+        # host that is slow or hostile, and the identicon costs a full fetch
+        # each time it is shown.
+        await db.scan_agent_icons.update_one(
+            {"chain_id": chain_id, "token_id": token_id},
+            {"$set": {"source_hash": source_hash, "content": Binary(b""), "content_type": "image/svg+xml",
+                      "failed_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
     return fallback_svg(chain_id, token_id), "image/svg+xml", False

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import agent_client
 import b402
-from guards import client_key, require_operator, run_limiter, task_limiter
+from guards import client_key, icon_limiter, require_operator, run_limiter, task_limiter
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import AuditEvent, AuthorizeRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks, sync_new_agents
@@ -428,7 +428,10 @@ async def get_onchain_agent(token_id: int, network: str = "mainnet"):
 
 
 @api.get("/onchain/agents/{network}/{token_id}/icon", tags=["agents"])
-async def onchain_agent_icon(network: str, token_id: int):
+async def onchain_agent_icon(network: str, token_id: int, request: Request):
+    # A cache miss makes us fetch from a host named in third-party metadata, so
+    # this path is metered like the other outbound ones.
+    icon_limiter.check(client_key(request))
     if network not in ("mainnet", "testnet"):
         raise HTTPException(400, "network must be mainnet or testnet")
     chain_id = 97 if network == "testnet" else 56

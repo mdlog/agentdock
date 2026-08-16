@@ -245,6 +245,31 @@ async def test_get_agent_icon_rejects_redirect_oversize_and_unsupported_mime(mon
         async def get(self, *_args, **_kwargs):
             return self.response
 
+        def stream(self, *_args, **_kwargs):
+            # The proxy streams now, so the body is refused mid-read rather than
+            # measured after arrival. The cases below are unchanged: a redirect,
+            # an oversize body and an unsupported type must all fall back.
+            response = self.response
+
+            class _Ctx:
+                async def __aenter__(self):
+                    return _Streamed(response)
+
+                async def __aexit__(self, *_):
+                    return False
+
+            return _Ctx()
+
+    class _Streamed:
+        def __init__(self, response):
+            self.status_code = response.status_code
+            self.headers = response.headers
+            self._content = response.content
+
+        async def aiter_bytes(self):
+            for start in range(0, len(self._content), 65536):
+                yield self._content[start:start + 65536]
+
     test_cases = [
         _Response(302, "image/png", b"abc"),
         _Response(200, "image/png", b"a" * (icon_proxy.MAX_ICON_BYTES + 1)),

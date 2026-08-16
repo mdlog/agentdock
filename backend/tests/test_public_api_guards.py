@@ -119,3 +119,94 @@ def test_reprobe_ttl_is_shorter_than_a_judging_window():
     import server
 
     assert 1 <= server.ENDPOINT_VERDICT_TTL_HOURS <= 24
+
+
+# --- an icon URL is attacker-controlled, so the limit must bound reading ------
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+class _StreamingResponse:
+    """Mimics httpx's streaming response over a body delivered in chunks."""
+
+    def __init__(self, chunks, status=200, content_type="image/png", declared=None):
+        self.status_code = status
+        self.headers = {"content-type": content_type}
+        if declared is not None:
+            self.headers["content-length"] = str(declared)
+        self._chunks = chunks
+        self.read_bytes = 0
+
+    async def aiter_bytes(self):
+        for chunk in self._chunks:
+            self.read_bytes += len(chunk)
+            yield chunk
+
+
+def _client_streaming(response):
+    class _Ctx:
+        async def __aenter__(self):
+            return response
+
+        async def __aexit__(self, *_):
+            return False
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        def stream(self, *_a, **_kw):
+            return _Ctx()
+
+    return lambda **_kw: _Client()
+
+
+@pytest.mark.anyio
+async def test_an_endless_body_is_abandoned_at_the_limit(monkeypatch):
+    """The finding this exists to close: measuring the body after reading it let
+    a hostile host buffer gigabytes against a one-megabyte cap."""
+    import icon_proxy
+
+    endless = _StreamingResponse([b"x" * 100_000] * 1000)
+    monkeypatch.setattr(icon_proxy.httpx, "AsyncClient", _client_streaming(endless))
+
+    assert await icon_proxy._fetch_icon("https://host.example/i.png") is None
+    # Stopped shortly past the cap rather than reading the whole 100MB.
+    assert endless.read_bytes <= icon_proxy.MAX_ICON_BYTES + 100_000
+
+
+@pytest.mark.anyio
+async def test_an_oversized_content_length_is_refused_without_reading(monkeypatch):
+    import icon_proxy
+
+    lying = _StreamingResponse([b"x" * 10], declared=icon_proxy.MAX_ICON_BYTES + 1)
+    monkeypatch.setattr(icon_proxy.httpx, "AsyncClient", _client_streaming(lying))
+
+    assert await icon_proxy._fetch_icon("https://host.example/i.png") is None
+    assert lying.read_bytes == 0
+
+
+@pytest.mark.anyio
+async def test_a_normal_icon_is_returned(monkeypatch):
+    import icon_proxy
+
+    ok = _StreamingResponse([b"\x89PNG", b"data"])
+    monkeypatch.setattr(icon_proxy.httpx, "AsyncClient", _client_streaming(ok))
+
+    assert await icon_proxy._fetch_icon("https://host.example/i.png") == (b"\x89PNGdata", "image/png")
+
+
+@pytest.mark.anyio
+async def test_a_disallowed_content_type_is_refused_without_reading(monkeypatch):
+    import icon_proxy
+
+    html = _StreamingResponse([b"<html>"], content_type="text/html")
+    monkeypatch.setattr(icon_proxy.httpx, "AsyncClient", _client_streaming(html))
+
+    assert await icon_proxy._fetch_icon("https://host.example/i.png") is None
+    assert html.read_bytes == 0

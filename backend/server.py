@@ -5,13 +5,14 @@ import re
 import uuid
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 from urllib.parse import urlparse
 
 import agent_client
 import b402
+from guards import client_key, require_operator, run_limiter, task_limiter
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import Agent, AgentList, AuditEvent, AuthorizeRequest, CompareRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
@@ -137,7 +138,7 @@ async def root():
     return {"message": "AgentDock API", "status": "ready"}
 
 
-@api.post("/b402/sync", tags=["b402"])
+@api.post("/b402/sync", dependencies=[Depends(require_operator)], tags=["b402"])
 async def trigger_b402_sync():
     """Refresh the catalog on demand. The startup task is best-effort; this is the
     reliable path, and it surfaces the upstream error instead of hiding it."""
@@ -180,7 +181,7 @@ async def readiness():
     return IntegrationReadiness(chain_id=CHAIN_ID, registry_configured=bool(os.environ.get("ERC8004_IDENTITY_REGISTRY")), rpc_reachable=rpc_ok, registry_has_code=code_ok, b402_ready=b402_merchant.ready, agent_endpoints_ready=endpoints_ready, object_storage_ready=artifacts.ready, storage_mode="object_storage" if artifacts.ready else "mongodb_fallback", notes=notes)
 
 
-@api.post("/onchain/sync-all", tags=["agents"])
+@api.post("/onchain/sync-all", dependencies=[Depends(require_operator)], tags=["agents"])
 async def trigger_full_sync(network: str = "mainnet"):
     """Ingest the whole chain catalogue in the background.
 
@@ -300,7 +301,7 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
     return result
 
 
-@api.post("/onchain/enrich-endpoints", tags=["agents"])
+@api.post("/onchain/enrich-endpoints", dependencies=[Depends(require_operator)], tags=["agents"])
 async def trigger_enrich(network: str = "mainnet"):
     chain_id = 97 if network == "testnet" else 56
     running = await db.sync_runs.find_one({"source": "endpoint_enrich", "chain_id": chain_id})
@@ -518,7 +519,10 @@ BLOCKED_TERMS = ("private key", "seed phrase", "recovery phrase", "approve token
 
 
 @api.post("/tasks", response_model=TaskRecord, status_code=201, tags=["tasks"])
-async def create_task(payload: TaskCreate):
+async def create_task(payload: TaskCreate, request: Request):
+    # Creating a task is what leads to calling a third-party agent, so the
+    # ceiling sits here rather than on the read paths a judge browses.
+    task_limiter.check(client_key(request))
     text = f"{payload.objective} {payload.constraints}".lower()
     blocked = next((term for term in BLOCKED_TERMS if term in text), None)
     if blocked:
@@ -594,7 +598,8 @@ def _call_params(task: dict, resource: dict) -> dict:
 
 
 @api.post("/tasks/{task_id}/run", tags=["tasks"])
-async def run_task(task_id: str):
+async def run_task(task_id: str, request: Request):
+    run_limiter.check(client_key(request))
     """Run the task against its agent. Onchain agents are called directly; b402
     resources go through the payment challenge."""
     task = await db.tasks.find_one({"id": task_id}, {"_id": 0})
@@ -813,7 +818,14 @@ async def feedback(task_id: str, payload: FeedbackRequest):
 
 
 app.include_router(api)
-app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=os.environ.get("CORS_ORIGINS", "").split(","), allow_methods=["*"], allow_headers=["*"])
+# An unset CORS_ORIGINS used to become [""], which allows nothing while looking
+# configured — the browser reports only an opaque CORS failure. Fail loudly at
+# boot instead, and never fall back to "*" with credentials enabled.
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+if not _cors_origins:
+    raise RuntimeError("CORS_ORIGINS must list the frontend origins, comma separated")
+app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=_cors_origins,
+                   allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Content-Type", "X-Admin-Token"])
 
 
 @app.on_event("shutdown")

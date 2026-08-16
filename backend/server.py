@@ -292,7 +292,13 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
                 unknown += 1
                 await asyncio.sleep(0.34)
                 continue
-            resolved.append((agent, agent_client.pick_endpoint(detail)))
+            # The list route the catalogue is built from returns rank as null for
+            # every agent; the detail route populates it. This call has already
+            # been made for the endpoint, so keeping its ranking costs nothing
+            # and gives a browsable agent the number its card asks for.
+            ranked = {k: detail.get(k) for k in ("rank", "network_rank", "total_score", "health_score",
+                                                 "total_feedbacks", "average_score") if detail.get(k) is not None}
+            resolved.append((agent, agent_client.pick_endpoint(detail), ranked))
             await asyncio.sleep(0.34)
 
         gate = asyncio.Semaphore(8)
@@ -306,9 +312,9 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
         verdict_cache: dict[str, tuple[str, str]] = {}
         host_locks: dict[str, asyncio.Lock] = {}
 
-        async def verify(agent: dict, ep: tuple[str, str] | None) -> tuple[dict, dict]:
+        async def verify(agent: dict, ep: tuple[str, str] | None, ranked: dict) -> tuple[dict, dict]:
             if not ep:
-                return agent, {"endpoint_status": "none", "endpoint_note": "No endpoint published onchain", "activatable": False}
+                return agent, {"endpoint_status": "none", "endpoint_note": "No endpoint published onchain", "activatable": False, **ranked}
             kind, url = ep
             token_id = agent["token_id"]
             resolved = agent_client.substitute_agent_id(url, token_id)
@@ -340,9 +346,9 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
                     agent.get("name") or "", agent.get("description") or "", caps)
                 update["categories"] = categories
                 update["categories_from"] = source
-            return agent, update
+            return agent, {**update, **ranked}
 
-        for completed in asyncio.as_completed([verify(a, e) for a, e in resolved]):
+        for completed in asyncio.as_completed([verify(a, e, r) for a, e, r in resolved]):
             agent, update = await completed
             update["endpoint_checked"] = True
             update["endpoint_checked_at"] = now_iso()
@@ -369,6 +375,28 @@ async def trigger_enrich(network: str = "mainnet"):
         raise HTTPException(409, "Endpoint enrichment already running")
     app.state.enrich_task = __import__("asyncio").create_task(enrich_endpoints(chain_id))
     return {"status": "started", "chain_id": chain_id}
+
+
+@api.get("/marketplace/pulse", tags=["agents"])
+async def marketplace_pulse(network: str = "mainnet"):
+    """What the marketplace has done lately, in numbers that move on their own.
+
+    Every figure is a count of work actually performed — registrations ingested,
+    endpoints called — rather than a rendering of activity. It is served
+    separately from the catalogue so the page can refresh it without refetching
+    anything else.
+    """
+    chain_id = 97 if network == "testnet" else 56
+    midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    head = await db.sync_runs.find_one({"source": "8004scan_head", "chain_id": chain_id}, {"_id": 0})
+    return {
+        "catalogue_total": await db.scan_agents.count_documents({"chain_id": chain_id}),
+        "registered_today": await db.scan_agents.count_documents({"chain_id": chain_id, "created_at": {"$gte": midnight}}),
+        "endpoints_verified": await db.scan_agents.count_documents({"chain_id": chain_id, "endpoint_status": {"$exists": True}}),
+        "agents_live": await db.scan_agents.count_documents({"chain_id": chain_id, "activatable": True}),
+        "synced_at": (head or {}).get("completed_at"),
+        "chain_id": chain_id,
+    }
 
 
 @api.get("/categories", tags=["agents"])

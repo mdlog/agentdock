@@ -101,6 +101,16 @@ a { color: inherit; text-decoration: none; }
 /* A vertical hand-off: the new word drops in from above while the old one
    falls away below, so the line reads as one word being replaced. The sizer
    reserves the widest word's width so nothing after it shifts. */
+/* Proof of life, not decoration: each figure is work this deployment did.
+   The dot breathes so the eye registers the line as current, and stops for
+   anyone who asked for less motion. */
+.live-pulse{display:flex;align-items:center;gap:7px;margin:14px 0 0;font-size:11.5px;color:#64748b}
+.live-pulse strong{color:var(--ink);font-weight:700}
+.pulse-dot{width:7px;height:7px;border-radius:50%;background:#16a34a;flex-shrink:0}
+@media(prefers-reduced-motion:no-preference){
+  .pulse-dot{animation:pulse-breathe 2.4s ease-in-out infinite}
+  @keyframes pulse-breathe{0%,100%{box-shadow:0 0 0 0 rgba(22,163,74,.45)}50%{box-shadow:0 0 0 5px rgba(22,163,74,0)}}
+}
 .rotating-word{position:relative;display:inline-grid;grid-auto-rows:1fr;overflow:hidden;vertical-align:bottom;color:var(--teal)}
 .rotating-word>span{grid-area:1/1;white-space:nowrap}
 .rotating-sizer{visibility:hidden;pointer-events:none}

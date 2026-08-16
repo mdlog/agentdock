@@ -7,6 +7,7 @@ import { OnchainAgentCard } from "@/components/OnchainAgentCard";
 import { B402ResourceCard } from "@/components/B402ResourceCard";
 import { CategoryBrowse } from "@/components/CategoryBrowse";
 import { RotatingWord } from "@/components/RotatingWord";
+import { LivePulse } from "@/components/LivePulse";
 import { Pagination } from "@/components/Pagination";
 import { useCompare } from "@/hooks/useCompare";
 import { Button } from "@/components/ui/button";
@@ -91,6 +92,7 @@ export default function MarketplacePage() {
           ? <RotatingWord words={themes.map(theme => theme.label)} />
           : <span>DeFi</span>}</h1><p data-testid="marketplace-subheading">Every categorised agent in the registry has been called to see whether it answers. Pick a job, compare the evidence, and activate the one that fits.</p></div>
       <div className="search-box"><Search size={21} /><Input data-testid="marketplace-search-input" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search agents by name or what they do" /><kbd>⌘ K</kbd></div>
+      <LivePulse />
       <div className="trust-row" data-testid="marketplace-stats"><span><strong data-testid="stat-payable-count">{payable.length}</strong> hireable now</span><span><strong data-testid="stat-onchain-count">{total.toLocaleString()}</strong> onchain agents</span><span><strong>BNB</strong> Chain mainnet</span></div>
     </section>
 

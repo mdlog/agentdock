@@ -21,7 +21,9 @@ Both bind to loopback only; the Cloudflare tunnel is the sole public path.
 ## After changing the frontend
 
 ```bash
-cd frontend && npm run build          # REACT_APP_BACKEND_URL is baked in here
+./scripts/build_frontend.sh          # REACT_APP_BACKEND_URL is baked in here
+#                                     builds to a staging dir and swaps only on
+#                                     success, so a broken build cannot 502 the site
 systemctl --user restart agentdock-web
 ```
 

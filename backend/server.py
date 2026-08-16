@@ -604,6 +604,24 @@ async def my_agents(address: str, network: str = "mainnet"):
         return {"items": cached, "total": len(cached), "upstream_total": None, "network": network, "owner_address": address, "source": "last_known_good", "degraded": True}
 
 
+def _endpoint_verdict(record: dict | None) -> dict | None:
+    """What happened when AgentDock last called this agent.
+
+    8004scan reports an agent as "Active" from its on-chain state, which says
+    the registration exists — not that anything answers. This is the other
+    half, and it belongs on the detail page rather than only on the card.
+    """
+    if not record or not record.get("endpoint_status"):
+        return None
+    return {
+        "status": record["endpoint_status"],
+        "note": record.get("endpoint_note"),
+        "activatable": bool(record.get("activatable")),
+        "checked_at": record.get("endpoint_checked_at"),
+        "endpoint_kind": record.get("endpoint_kind"),
+    }
+
+
 @api.get("/onchain/agent-details/{network}/{token_id}", tags=["agents"])
 async def onchain_agent_detail(network: str, token_id: int):
     if network not in ("mainnet", "testnet"):
@@ -625,6 +643,7 @@ async def onchain_agent_detail(network: str, token_id: int):
             {"chain_id": chain_id, "agent_id": raw.get("id")}, {"_id": 0, "raw_8004scan": 0}
         ).sort("submitted_at", -1).to_list(20)
         return {"agent": detail_projection(raw), "feedbacks": [feedback_projection(r) for r in feedback_rows],
+                "verdict": _endpoint_verdict(cached),
                 "source": "synced", "fetched_at": cached.get("synced_at")}
 
     try:
@@ -644,7 +663,8 @@ async def onchain_agent_detail(network: str, token_id: int):
         feedback_rows = await db.scan_feedbacks.find({"chain_id": chain_id, "agent_id": raw.get("id")}, {"_id": 0, "raw_8004scan": 0}).sort("submitted_at", -1).to_list(20)
         feedbacks = [feedback_projection(row) for row in feedback_rows]
         source = "last_known_good"
-    return {"agent": detail_projection(raw), "feedbacks": feedbacks, "source": source, "fetched_at": now_iso()}
+    return {"agent": detail_projection(raw), "feedbacks": feedbacks, "verdict": _endpoint_verdict(cached),
+            "source": source, "fetched_at": now_iso()}
 
 
 BLOCKED_TERMS = ("private key", "seed phrase", "recovery phrase", "approve token", "unlimited approval", "execute swap", "sign for me")

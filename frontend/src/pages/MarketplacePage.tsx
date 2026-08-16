@@ -41,6 +41,11 @@ export default function MarketplacePage() {
   // Retrying needs a value that actually changes: setOffset(o => o) writes the
   // same number, React bails out, and the effect never re-runs.
   const [retry, setRetry] = useState(0);
+  // Which registry to browse. The two sources answer different questions — one
+  // is a directory of services you can buy, the other a registry of onchain
+  // identities — so a visitor who wants only one should not have to scroll
+  // past the other.
+  const [source, setSource] = useState<"all" | "b402" | "onchain">("all");
   const { selected, toggle } = useCompare();
 
   // Typing must not fire a query per keystroke against a 256k catalogue.
@@ -84,13 +89,32 @@ export default function MarketplacePage() {
 
     <CategoryBrowse categories={categories} selected={category} onSelect={selectCategory} />
 
-    {visiblePayable.length > 0 && <section className="catalog-section">
+    <nav className="source-switch" data-testid="source-switch" aria-label="Agent source">
+      {([
+        { key: "all", label: "All sources", note: "Both registries", count: null },
+        { key: "b402", label: "Pay per call", note: "b402 Bazaar · charges per call", count: visiblePayable.length },
+        { key: "onchain", label: "Onchain identities", note: "8004scan · free to activate", count: loadError ? null : total },
+      ] as const).map(option =>
+        <button
+          key={option.key}
+          type="button"
+          data-testid={`source-${option.key}`}
+          className={source === option.key ? "active" : ""}
+          aria-pressed={source === option.key}
+          onClick={() => setSource(option.key)}
+        >
+          <strong>{option.label}{option.count !== null && <em>{option.count.toLocaleString()}</em>}</strong>
+          <span>{option.note}</span>
+        </button>)}
+    </nav>
+
+    {source !== "onchain" && visiblePayable.length > 0 && <section className="catalog-section">
       <div className="catalog-heading"><div><p className="section-kicker"><Zap size={13} /> Pay per call · b402 Bazaar</p><h2 data-testid="payable-heading">{activeCat ? `Hireable ${activeCat.label} agents` : "Agents you can hire right now"}</h2></div><span data-testid="payable-result-count">{visiblePayable.length} services</span></div>
       <p className="payable-notice" data-testid="payable-notice"><ShieldAlert size={14} /><span><strong>You sign with your own wallet.</strong> Price, token and recipient are shown before anything is signed — settlement on BNB Chain.</span></p>
       <div className="onchain-grid" data-testid="payable-grid">{visiblePayable.map(r => <B402ResourceCard key={r.id} resource={r} />)}</div>
     </section>}
 
-    <section className="catalog-section">
+    {source !== "b402" && <section className="catalog-section">
       <div className="catalog-heading"><div><p className="section-kicker">Onchain identities · 8004scan</p><h2 data-testid="catalog-heading">{activeCat ? `${activeCat.label} agents` : "All onchain agents on BNB Chain"}</h2><p className="section-note" data-testid="onchain-hire-note">{activeCat ? activeCat.blurb + " Discovered from 8004scan by each agent's own onchain metadata." : "Discovered from 8004scan. Pick a category above to narrow to agents that do a specific job."}</p></div><span data-testid="agent-result-count">{loadError ? "Count unavailable" : <><strong data-testid="agent-ready-count">{readyTotal}</strong> ready to hire · {total.toLocaleString()}{totalCapped ? "+" : ""} registered</>}</span></div>
       <div className="filter-bar" data-testid="agent-filter-bar">
         <Select value={protocol} onValueChange={v => { setProtocol(v); setOffset(0); }}><SelectTrigger data-testid="protocol-filter"><SelectValue placeholder="Protocol" /></SelectTrigger><SelectContent><SelectItem data-testid="protocol-all" value="all">All protocols</SelectItem>{protocols.map(p => <SelectItem data-testid={`protocol-${p.toLowerCase()}`} value={p} key={p}>{p}</SelectItem>)}</SelectContent></Select>
@@ -108,6 +132,15 @@ export default function MarketplacePage() {
           : loadError
             ? <div className="empty-state" data-testid="agents-load-error"><ShieldAlert size={28} /><h3>Could not load the catalogue</h3><p>{loadError}</p><Button onClick={() => setRetry(n => n + 1)} data-testid="agents-retry-button">Try again</Button></div>
             : <div className="empty-state" data-testid="agents-empty-state"><Search size={28} /><h3>No agents match</h3><p>{activeCat ? "No agents in this category match your search yet." : "Try a broader term, or clear the protocol filter."}</p></div>}
-    </section>
+    </section>}
+
+    {source === "b402" && visiblePayable.length === 0 && <section className="catalog-section">
+      <div className="empty-state" data-testid="payable-empty-state">
+        <Zap size={28} />
+        <h3>No paid service matches</h3>
+        <p>{activeCat ? `No b402 service does ${activeCat.label.toLowerCase()} yet. The onchain registry may still have agents for it.` : "Try a broader search term."}</p>
+        <Button variant="outline" onClick={() => setSource("onchain")}>Browse onchain identities</Button>
+      </div>
+    </section>}
   </div>;
 }

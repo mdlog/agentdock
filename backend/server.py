@@ -15,7 +15,7 @@ import b402
 from integrations import ArtifactStore, B402Adapter, B402Unavailable, registry_health
 from models import Agent, AgentList, AuditEvent, AuthorizeRequest, CompareRequest, FeedbackRequest, IntegrationReadiness, PayRequest, QuoteRequest, ScanAgent, ScanAgentList, ScanFeedback, TaskCreate, TaskDetail, TaskRecord
 from seed_data import CATEGORIES, PANCAKE_POOLS, seed_agents
-from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks
+from scan8004 import AGENT_CATEGORIES, Scan8004Client, Scan8004Error, detail_projection, feedback_projection, public_projection, sync_all_agents, sync_bsc_mainnet, sync_bsc_testnet, sync_feedbacks, sync_new_agents
 from icon_proxy import get_agent_icon
 
 
@@ -81,7 +81,24 @@ async def startup() -> None:
     app.state.scan_testnet_task = __import__("asyncio").create_task(sync_bsc_testnet(db))
     app.state.b402_sync_task = __import__("asyncio").create_task(sync_b402_catalog())
     app.state.scan_mainnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 56, False))
+    app.state.head_sync_task = __import__("asyncio").create_task(_head_sync_loop())
     app.state.scan_testnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 97, True))
+
+
+async def _head_sync_loop(interval_seconds: int = 600) -> None:
+    """The registry never stops growing, so staying current is a standing job,
+    not a one-shot crawl. New registrations sit at offset 0 — the only place
+    the upstream API is fast — so each pass costs seconds. Restart-safe by
+    construction: every pass is idempotent, and a killed loop simply resumes
+    on the next boot."""
+    while True:
+        try:
+            result = await sync_new_agents(db)
+            if result.get("new_agents"):
+                print(f"Head sync: +{result['new_agents']} new agents")
+        except Exception as exc:  # never let the loop die on a bad pass
+            print(f"Head sync pass failed: {exc}")
+        await asyncio.sleep(interval_seconds)
 
 
 async def sync_b402_catalog() -> dict:

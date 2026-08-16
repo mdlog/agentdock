@@ -142,14 +142,14 @@ class Scan8004Client:
     async def list_bsc_testnet(self, page: int = 1, limit: int = 100) -> tuple[list[dict], dict, dict]:
         return await self._list_agents(TESTNET_CHAIN_ID, True, page, limit)
 
-    async def list_all_agents(self, chain_id: int, offset: int, limit: int = 100) -> tuple[list[dict], int | None]:
+    async def list_all_agents(self, chain_id: int, offset: int, limit: int = 100, extra_params: dict | None = None) -> tuple[list[dict], int | None]:
         """Offset-paged listing from the 180/min route, for full-catalog ingestion.
 
         Note the parameter name: this route filters on `chain_id`, while /public
         wants `chainId`. Passing the camelCase spelling here is silently ignored
         and returns agents from every chain mixed together.
         """
-        response = await self._get("/agents", {"chain_id": chain_id, "limit": limit, "offset": offset}, base=self.detail_base_url)
+        response = await self._get("/agents", {"chain_id": chain_id, "limit": limit, "offset": offset, **(extra_params or {})}, base=self.detail_base_url)
         try:
             payload = response.json()
             items = payload.get("items")
@@ -348,7 +348,7 @@ async def _sync_agents(db, chain_id: int, is_testnet: bool) -> dict:
 FULL_SYNC_SOURCE = "8004scan_full"
 
 
-async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int = 100, pace: float = 0.4, concurrency: int = 6, start_offset: int = 0) -> dict:
+async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int = 100, pace: float = 0.4, concurrency: int = 6, start_offset: int = 0, extra_params: dict | None = None, stop_when_complete: bool = False) -> dict:
     """Ingest every agent on one chain, not just the first ranked page.
 
     Pages are fetched `concurrency` at a time. Sequentially this managed only
@@ -379,7 +379,7 @@ async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
             # used to end the whole sync and forfeit the remaining catalogue.
             for attempt in range(4):
                 try:
-                    pages = await asyncio.gather(*(client.list_all_agents(chain_id, o, page_size) for o in offsets))
+                    pages = await asyncio.gather(*(client.list_all_agents(chain_id, o, page_size, extra_params) for o in offsets))
                     break
                 except Scan8004Error:
                     if attempt == 3:
@@ -405,6 +405,14 @@ async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
             await db.sync_runs.update_one(key, {"$set": {"imported": imported, "available_total": available, "offset": offset}})
             if available is not None and offset >= available:
                 break
+            # A gap-filling crawl overlaps rows the catalogue already holds. The
+            # moment the stored count reaches the upstream total, everything
+            # after this point is duplicate work at the most expensive offsets —
+            # so a completeness-directed run declares itself done instead.
+            if stop_when_complete and available is not None:
+                stored = await db.scan_agents.count_documents({"chain_id": chain_id})
+                if stored >= available:
+                    break
             await asyncio.sleep(pace)
         result = {"status": "success", "source": FULL_SYNC_SOURCE, "chain_id": chain_id, "imported": imported, "available_total": available, "completed_at": utc_now(), "error": None}
     except Exception as exc:
@@ -412,6 +420,62 @@ async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
         # Partial progress is kept: rows already written stay, and the run is
         # restartable from the recorded offset.
         result = {"status": "degraded", "source": FULL_SYNC_SOURCE, "chain_id": chain_id, "imported": imported, "available_total": available, "offset": offset, "error": message, "failed_at": utc_now()}
+    await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
+    return result
+
+
+HEAD_SYNC_SOURCE = "8004scan_head"
+
+
+async def sync_new_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int = 100, max_pages: int = 30) -> dict:
+    """Catch registrations made since the last pass.
+
+    The registry grows continuously, so any one-shot crawl ends slightly behind.
+    New agents carry the highest token ids, which the default (newest-first)
+    ordering serves from offset 0 — the one place this API is fast. Walking
+    newest-first until a whole page is already known therefore stays a
+    seconds-long operation forever, no matter how large the catalogue gets.
+
+    One page of overlap is tolerated before stopping: concurrent registrations
+    can reorder the head between requests, and stopping on the first known row
+    would miss rows pushed one page deeper.
+    """
+    key = {"source": HEAD_SYNC_SOURCE, "chain_id": chain_id}
+    client = Scan8004Client()
+    imported = scanned = 0
+    available = None
+    try:
+        from pymongo import UpdateOne
+
+        for page_index in range(max_pages):
+            rows, total = await client.list_all_agents(chain_id, page_index * page_size, page_size)
+            if total is not None:
+                available = total
+            if not rows:
+                break
+            token_ids = [int(r["token_id"]) for r in rows if r.get("token_id") is not None]
+            known = await db.scan_agents.count_documents({"chain_id": chain_id, "token_id": {"$in": token_ids}})
+            ops = []
+            for raw in rows:
+                projection = public_projection(raw, chain_id, bool(raw.get("is_testnet")))
+                ops.append(UpdateOne(
+                    {"chain_id": chain_id, "token_id": projection["token_id"]},
+                    {"$set": {**projection, "raw_8004scan": raw, "synced_at": utc_now()}},
+                    upsert=True,
+                ))
+            outcome = await db.scan_agents.bulk_write(ops, ordered=False)
+            imported += outcome.upserted_count
+            scanned += len(rows)
+            if known == len(rows):
+                break
+            await asyncio.sleep(0.4)
+        result = {"status": "success", "source": HEAD_SYNC_SOURCE, "chain_id": chain_id,
+                  "new_agents": imported, "scanned": scanned, "available_total": available,
+                  "completed_at": utc_now(), "error": None}
+    except Exception as exc:
+        message = str(exc) if isinstance(exc, Scan8004Error) else "Unexpected head synchronization error"
+        result = {"status": "degraded", "source": HEAD_SYNC_SOURCE, "chain_id": chain_id,
+                  "new_agents": imported, "error": message, "failed_at": utc_now()}
     await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
     return result
 

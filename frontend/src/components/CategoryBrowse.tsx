@@ -11,10 +11,14 @@ const ICONS: Record<string, typeof Layers> = {
   "health-factor": HeartPulse,
 };
 
-export const CategoryBrowse = ({ categories, selected, onSelect }: {
+export const CategoryBrowse = ({ categories, selected, onSelect, leading }: {
   categories: AgentCategory[];
   selected: string | null;
   onSelect: (key: string | null) => void;
+  // Rendered at the head of the same row as the chips: choosing a registry and
+  // choosing a job are one decision made in two parts, so they read as one
+  // control rather than two stacked blocks.
+  leading?: React.ReactNode;
 }) => (
   <section className="category-browse" data-testid="category-browse">
     <div className="category-browse-head">
@@ -22,6 +26,8 @@ export const CategoryBrowse = ({ categories, selected, onSelect }: {
       {selected && <button className="category-clear" data-testid="category-clear" onClick={() => onSelect(null)}>Show all agents</button>}
     </div>
     <div className="category-grid" data-testid="category-grid">
+      {leading}
+      <div className="category-chips">
       {categories.map(cat => {
         const Icon = ICONS[cat.key] ?? Layers;
         const active = selected === cat.key;
@@ -50,6 +56,7 @@ export const CategoryBrowse = ({ categories, selected, onSelect }: {
           </button>
         );
       })}
+      </div>
     </div>
   </section>
 );

@@ -87,28 +87,32 @@ export default function MarketplacePage() {
       <div className="trust-row" data-testid="marketplace-stats"><span><strong data-testid="stat-payable-count">{payable.length}</strong> hireable now</span><span><strong data-testid="stat-onchain-count">{total.toLocaleString()}</strong> onchain agents</span><span><strong>BNB</strong> Chain mainnet</span></div>
     </section>
 
-    <CategoryBrowse categories={categories} selected={category} onSelect={selectCategory} />
+    <CategoryBrowse
+      categories={categories}
+      selected={category}
+      onSelect={selectCategory}
+      leading={<nav className="source-switch" data-testid="source-switch" aria-label="Agent source">
+        {/* The source each option names is spelled out in the section kicker
+            directly below it ("Pay per call · b402 Bazaar"), so the control
+            itself only needs the choice and its size. */}
+        {([
+          { key: "all", label: "All sources", count: null },
+          { key: "b402", label: "Pay per call", count: visiblePayable.length },
+          { key: "onchain", label: "Onchain", count: loadError ? null : total },
+        ] as const).map(option =>
+          <button
+            key={option.key}
+            type="button"
+            data-testid={`source-${option.key}`}
+            className={source === option.key ? "active" : ""}
+            aria-pressed={source === option.key}
+            onClick={() => setSource(option.key)}
+          >
+            {option.label}{option.count !== null && <em>{option.count.toLocaleString()}</em>}
+          </button>)}
+      </nav>}
+    />
 
-    <nav className="source-switch" data-testid="source-switch" aria-label="Agent source">
-      {/* The source each option names is spelled out in the section kicker
-          directly below it ("Pay per call · b402 Bazaar"), so the control
-          itself only needs the choice and its size. */}
-      {([
-        { key: "all", label: "All sources", count: null },
-        { key: "b402", label: "Pay per call", count: visiblePayable.length },
-        { key: "onchain", label: "Onchain", count: loadError ? null : total },
-      ] as const).map(option =>
-        <button
-          key={option.key}
-          type="button"
-          data-testid={`source-${option.key}`}
-          className={source === option.key ? "active" : ""}
-          aria-pressed={source === option.key}
-          onClick={() => setSource(option.key)}
-        >
-          {option.label}{option.count !== null && <em>{option.count.toLocaleString()}</em>}
-        </button>)}
-    </nav>
 
     {source !== "onchain" && visiblePayable.length > 0 && <section className="catalog-section">
       <div className="catalog-heading"><div><p className="section-kicker"><Zap size={13} /> Pay per call · b402 Bazaar</p><h2 data-testid="payable-heading">{activeCat ? `Hireable ${activeCat.label} agents` : "Agents you can hire right now"}</h2></div><span data-testid="payable-result-count">{visiblePayable.length} services</span></div>

@@ -328,8 +328,7 @@ async def call_mcp(url: str, objective: str, wallet: str | None = None, action: 
                 raise AgentRejected(f"The agent's {action} tool reported an error: {text or 'no detail given'}", reason="upstream_error")
             if not text:
                 text = json.dumps(result)[:2000]
-            if text.strip() in ("{}", "[]", "null", ""):
-                raise AgentRejected(f"The agent's {action} tool returned an empty answer.", reason="empty")
+            assess_answer(text)
             return {"transport": "mcp", "tool": action, "tools": names, "output": text[:4000]}
 
         chat = next((t for t in tools if t.get("name") in ("chat", "ask", "message", "query", "prompt")), None)
@@ -347,8 +346,7 @@ async def call_mcp(url: str, objective: str, wallet: str | None = None, action: 
                 raise AgentRejected(f"The agent's {chat['name']} tool reported an error: {text or 'no detail given'}", reason="upstream_error")
             if not text:
                 text = json.dumps(result)[:2000]
-            if not text.strip() or text.strip() in ("{}", "[]", "null"):
-                raise AgentRejected(f"The agent's {chat['name']} tool returned an empty answer.", reason="empty")
+            assess_answer(text)
             return {"transport": "mcp", "tool": chat["name"], "tools": names, "output": text[:4000]}
         # No conversational tool. Before falling back to a listing, call the
         # tools that are safe to call unasked — read-only by name, and needing
@@ -368,7 +366,9 @@ async def call_mcp(url: str, objective: str, wallet: str | None = None, action: 
                 if result.get("isError"):
                     continue
                 text = "\n".join(c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text").strip()
-                if text and text not in ("{}", "[]", "null"):
+                # An error or a bare acknowledgment is not worth relaying; the
+                # next tool may still produce a real answer.
+                if _substantive(text):
                     outputs.append(f"── {tool['name']}\n{text[:1600]}")
             except (AgentRejected, AgentPaymentRequired):
                 continue
@@ -376,9 +376,74 @@ async def call_mcp(url: str, objective: str, wallet: str | None = None, action: 
                 break
         if outputs:
             return {"transport": "mcp", "tool": "readonly", "tools": names, "output": "\n\n".join(outputs)[:4000]}
+        if not tools:
+            # A menu with nothing on it is not a completed task.
+            raise AgentRejected("The agent answered but declares no callable tools.", reason="empty")
         summary = "This agent exposes the following live tools:\n" + "\n".join(
-            f"• {t.get('name')}: {str(t.get('description') or '')[:100]}" for t in tools[:20]) if tools else "The agent responded but declared no callable tools."
+            f"• {t.get('name')}: {str(t.get('description') or '')[:100]}" for t in tools[:20])
         return {"transport": "mcp", "tools": names, "output": summary}
+
+
+# Keys and values that make a JSON object an acknowledgment rather than an
+# answer. "status": "OK" says the request arrived; it does not say anything was
+# done. The value set includes "false" because {"success": false} carries no
+# more content than {"success": true} — either way the agent said nothing.
+_ACK_KEYS = {"status", "state", "ok", "success", "code", "message", "msg",
+             "detail", "result", "data", "value", "response", "id", "timestamp"}
+_ACK_VALUES = {"", "ok", "okay", "success", "successful", "done", "true",
+               "false", "null", "none", "200", "202", "accepted", "received",
+               "completed", "pending"}
+_ERROR_KEYS = ("error", "err", "errors", "error_message", "errormessage", "exception")
+
+
+def assess_answer(text: str) -> None:
+    """Reject a payload that is an error or an empty acknowledgment in disguise.
+
+    An agent can complete the JSON-RPC exchange flawlessly while the payload
+    says the work failed ({"error": "unknown skill: None"}) or says nothing at
+    all ({"status": "OK"}). Recording either as a completed task dresses a
+    failure up as an answer — the habit this product exists to break — so both
+    are graded here, where every transport's final text passes through.
+
+    Long or non-JSON text is left alone: prose is the agent's answer, and
+    judging its quality is the reader's job, not ours.
+    """
+    stripped = text.strip()
+    if not stripped or stripped in ("{}", "[]", "null"):
+        raise AgentRejected("The agent returned an empty answer.", reason="empty")
+    if len(stripped) > 600 or stripped[0] not in "{[":
+        return
+    try:
+        payload = json.loads(stripped)
+    except ValueError:
+        return
+    if isinstance(payload, list):
+        if not any(item not in (None, "", {}, []) for item in payload):
+            raise AgentRejected("The agent returned an empty answer.", reason="empty")
+        return
+    if not isinstance(payload, dict):
+        return
+    for key in payload:
+        if key.lower() in _ERROR_KEYS and payload[key]:
+            detail = payload[key]
+            detail = json.dumps(detail) if isinstance(detail, (dict, list)) else str(detail)
+            raise AgentRejected(
+                f"The agent reported an error instead of an answer: {detail[:200]}",
+                reason="upstream_error")
+    if payload and all(k.lower() in _ACK_KEYS for k in payload):
+        if all(v is None or str(v).strip().lower() in _ACK_VALUES for v in payload.values()):
+            raise AgentRejected(
+                f"The agent acknowledged the request but returned no answer: {stripped[:120]}",
+                reason="empty")
+
+
+def _substantive(text: str) -> bool:
+    """assess_answer as a filter, for places that skip rather than fail."""
+    try:
+        assess_answer(text)
+    except AgentRejected:
+        return False
+    return True
 
 
 def _a2a_text(result: dict[str, Any]) -> str:
@@ -400,6 +465,28 @@ def _a2a_text(result: dict[str, Any]) -> str:
     return "\n".join(p for p in found if p).strip()
 
 
+def _a2a_data(result: dict[str, Any]) -> list[dict]:
+    """Data parts of an A2A reply, wherever the shape put them.
+
+    Agents that speak in structured envelopes (a quote, a status object — or an
+    error) answer with parts of kind "data" and no text at all. Reading only
+    text parts made those replies look empty, and the fallback then serialised
+    the whole message envelope, burying the agent's actual payload — including
+    its error — under contextId/messageId boilerplate.
+    """
+    def _parts(holder: Any) -> list[dict]:
+        if not isinstance(holder, dict):
+            return []
+        return [p["data"] for p in (holder.get("parts") or [])
+                if isinstance(p, dict) and p.get("kind") == "data" and isinstance(p.get("data"), dict)]
+
+    found = _parts(result) + _parts(result.get("message"))
+    found += _parts((result.get("status") or {}).get("message") if isinstance(result.get("status"), dict) else None)
+    for artifact in (result.get("artifacts") or []):
+        found += _parts(artifact)
+    return found
+
+
 async def call_a2a(url: str, objective: str, token_id: int | None = None) -> dict[str, Any]:
     await _assert_public_https(substitute_agent_id(url, token_id))
     async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
@@ -414,9 +501,23 @@ async def call_a2a(url: str, objective: str, token_id: int | None = None) -> dic
         if state in ("failed", "rejected", "canceled", "cancelled"):
             raise AgentRejected(f"The agent ended the task as {state}: {text or 'no reason given'}", reason="upstream_error")
         if not text:
+            data_parts = _a2a_data(result)
+            for data in data_parts:
+                # An error inside a data part is the agent's actual answer.
+                for key in data:
+                    if key.lower() in _ERROR_KEYS and data[key]:
+                        detail = data[key]
+                        detail = json.dumps(detail) if isinstance(detail, (dict, list)) else str(detail)
+                        raise AgentRejected(
+                            f"The agent reported an error instead of an answer: {detail[:200]}",
+                            reason="upstream_error")
+            if data_parts:
+                # The payloads alone, without the envelope boilerplate that
+                # would drown them.
+                text = json.dumps(data_parts[0] if len(data_parts) == 1 else data_parts)[:2000]
+        if not text:
             text = json.dumps(result)[:2000]
-        if text.strip() in ("{}", "[]", "null", ""):
-            raise AgentRejected("The agent returned an empty answer.", reason="empty")
+        assess_answer(text)
         return {"transport": "a2a", "output": text[:4000]}
 
 

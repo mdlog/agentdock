@@ -865,3 +865,111 @@ def test_rank_falls_back_to_the_other_spelling_8004scan_uses():
     assert public_projection(raw, 56, False)["rank"] == 5
     # An explicit rank always wins over the fallback.
     assert public_projection({**raw, "rank": 12}, 56, False)["rank"] == 12
+
+
+# --- an error or an acknowledgment is not an answer --------------------------
+# Both cases below were found live by a simulated judge: agent #265375 answered
+# {"error": "unknown skill: None"} and the task showed "completed"; a zero-tool
+# agent "completed" with {"status": "OK"}.
+
+
+@pytest.mark.anyio
+async def test_an_error_wrapped_in_a_successful_envelope_fails_the_task(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"error": "unknown skill: None"}}),
+    ])
+
+    with pytest.raises(agent_client.AgentRejected, match="unknown skill"):
+        await agent_client.call_a2a("https://agent.example/rpc", "rebalance my LP position")
+
+
+@pytest.mark.anyio
+async def test_a_bare_acknowledgment_is_not_a_completed_task(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"status": "OK"}),
+    ])
+
+    with pytest.raises(agent_client.AgentRejected) as excinfo:
+        await agent_client.call_a2a("https://agent.example/rpc", "watch my health factor")
+
+    assert excinfo.value.reason == "empty"
+
+
+@pytest.mark.anyio
+async def test_a_real_a2a_answer_still_passes(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {
+            "parts": [{"kind": "text", "text": "Pool 607.46, range 548-670, in range, fees accruing."}]}}),
+    ])
+
+    result = await agent_client.call_a2a("https://agent.example/rpc", "status")
+
+    assert "607.46" in result["output"]
+
+
+@pytest.mark.anyio
+async def test_mcp_declaring_zero_tools_is_an_honest_failure(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+    ])
+
+    with pytest.raises(agent_client.AgentRejected, match="no callable tools"):
+        await agent_client.call_mcp("https://agent.example/mcp", "do anything")
+
+
+def test_assess_answer_grades_payloads_not_prose():
+    from agent_client import AgentRejected, assess_answer
+
+    # Real answers pass, including short numeric JSON.
+    assess_answer("The pool price is 607.46 and your position is in range.")
+    assess_answer('{"price": 607.46, "range": [548, 670]}')
+    assess_answer('{"result": 42.7}')
+    assess_answer('{"status": {"positions": 3, "tvl_usd": 812.55}}')
+
+    # Errors in disguise fail with the agent's own words.
+    with pytest.raises(AgentRejected, match="unknown skill"):
+        assess_answer('{"error": "unknown skill: None"}')
+    with pytest.raises(AgentRejected):
+        assess_answer('{"errors": [{"message": "bad input"}]}')
+
+    # Acknowledgments fail as empty.
+    for ack in ('{"status": "OK"}', '{"success": true}', '{"code": 200, "message": "accepted"}',
+                '{"success": false}', "[]", "{}", "  "):
+        with pytest.raises(AgentRejected) as excinfo:
+            assess_answer(ack)
+        assert excinfo.value.reason == "empty", ack
+
+    # An error key that is empty is not an error report.
+    assess_answer('{"error": null, "data": {"apy": 3.28}}')
+
+
+@pytest.mark.anyio
+async def test_an_error_in_a_data_part_fails_the_task(monkeypatch, public_host):
+    """Agent #265375 answers with DataParts, not text: its error travelled as
+    parts[0].data.error inside envelope boilerplate and was recorded completed."""
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {
+            "contextId": "ctx-1", "kind": "message", "messageId": "m-1", "role": "agent",
+            "parts": [{"kind": "data", "data": {
+                "error": "unknown skill: None", "skills": ["negotiate", "notify_funded"],
+                "hint": "send the skill envelope as an A2A data part"}}]}}),
+    ])
+
+    with pytest.raises(agent_client.AgentRejected, match="unknown skill"):
+        await agent_client.call_a2a("https://agent.example/rpc", "report my position status")
+
+
+@pytest.mark.anyio
+async def test_a_data_part_answer_is_relayed_without_envelope_boilerplate(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {
+            "contextId": "ctx-2", "kind": "message", "messageId": "m-2", "role": "agent",
+            "parts": [{"kind": "data", "data": {
+                "quote": {"amount": "0.1", "chainId": 56}, "pool_price": 607.46}}]}}),
+    ])
+
+    result = await agent_client.call_a2a("https://agent.example/rpc", "quote me")
+
+    assert "607.46" in result["output"]
+    assert "contextId" not in result["output"]

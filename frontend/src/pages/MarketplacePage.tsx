@@ -35,6 +35,9 @@ export default function MarketplacePage() {
   // cleared, and "No agents match · 0 matches" reads as a fact about BNB Chain
   // rather than as our own outage.
   const [loadError, setLoadError] = useState("");
+  // Retrying needs a value that actually changes: setOffset(o => o) writes the
+  // same number, React bails out, and the effect never re-runs.
+  const [retry, setRetry] = useState(0);
   const { selected, toggle } = useCompare();
 
   // Typing must not fire a query per keystroke against a 256k catalogue.
@@ -52,7 +55,7 @@ export default function MarketplacePage() {
       .then(o => { setOnchain(o.data.items); setTotal(o.data.total); setReadyTotal(o.data.ready_total ?? 0); setLoadError(""); })
       .catch(e => { setOnchain([]); setTotal(0); setReadyTotal(0); setLoadError(messageFromError(e)); })
       .finally(() => setLoading(false));
-  }, [debounced, protocol, sort, offset, category]);
+  }, [debounced, protocol, sort, offset, category, retry]);
 
   useEffect(() => {
     api.get("/b402/resources").then(r => setPayable(r.data.items)).catch(() => setPayable([]));
@@ -100,7 +103,7 @@ export default function MarketplacePage() {
           ? <><div className="onchain-grid" data-testid="agent-grid">{onchain.map(agent => <OnchainAgentCard key={agent.id} agent={agent} network="mainnet" compare={{ selected: selected.includes(agent.id), toggle }} />)}</div>
             <Pagination total={total} offset={offset} limit={PAGE} onChange={setOffset} testId="onchain-pagination" /></>
           : loadError
-            ? <div className="empty-state" data-testid="agents-load-error"><ShieldAlert size={28} /><h3>Could not load the catalogue</h3><p>{loadError}</p><Button onClick={() => setOffset(o => o)} data-testid="agents-retry-button">Try again</Button></div>
+            ? <div className="empty-state" data-testid="agents-load-error"><ShieldAlert size={28} /><h3>Could not load the catalogue</h3><p>{loadError}</p><Button onClick={() => setRetry(n => n + 1)} data-testid="agents-retry-button">Try again</Button></div>
             : <div className="empty-state" data-testid="agents-empty-state"><Search size={28} /><h3>No agents match</h3><p>{activeCat ? "No agents in this category match your search yet." : "Try a broader term, or clear the protocol filter."}</p></div>}
     </section>
   </div>;

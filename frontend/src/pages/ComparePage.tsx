@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Info, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Info, Plus, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, messageFromError } from "@/lib/api";
 import type { OnchainAgent } from "@/types";
 import { useCompare } from "@/hooks/useCompare";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { compactNumber } from "@/components/OnchainAgentCard";
 
@@ -19,16 +20,28 @@ const Row = ({ label, hint, agents, render }: { label: string; hint?: string; ag
 export default function ComparePage() {
   const { selected, toggle, clear } = useCompare();
   const [agents, setAgents] = useState<OnchainAgent[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const key = selected.join(",");
 
   useEffect(() => {
-    if (selected.length < 2) { setAgents([]); return; }
-    // The onchain catalog has no compare endpoint; the synchronized sample is one
-    // request, so the selection is resolved from it in selection order.
-    api.get("/onchain/agents?network=mainnet").then(r => {
-      const byId = new Map<string, OnchainAgent>(r.data.items.map((item: OnchainAgent) => [item.id, item]));
-      setAgents(selected.map(id => byId.get(id)).filter((x): x is OnchainAgent => Boolean(x)));
-    }).catch(() => setAgents([]));
+    if (selected.length < 2) { setAgents([]); setLoadError(""); return; }
+    setLoading(true);
+    // Each selection is fetched by id. Resolving them out of one default page
+    // meant anything outside the first 60 of 256,000 silently vanished, leaving
+    // a table of labels with no columns and no explanation.
+    Promise.all(selected.map(id =>
+      api.get(`/onchain/agents/${id.split("-")[2]}?network=mainnet`)
+        .then(r => r.data as OnchainAgent)
+        .catch(() => null)
+    )).then(resolved => {
+      const found = resolved.filter((x): x is OnchainAgent => Boolean(x));
+      setAgents(found);
+      // Say what could not be loaded instead of quietly dropping it.
+      const missing = resolved.length - found.length;
+      setLoadError(missing ? `${missing} of ${resolved.length} selected agents could not be loaded.` : "");
+    }).catch(e => { setAgents([]); setLoadError(messageFromError(e)); })
+      .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
@@ -44,7 +57,12 @@ export default function ComparePage() {
       <Button data-testid="clear-comparison-button" variant="outline" onClick={clear}><Trash2 size={15} /> Clear</Button>
     </div>
 
-    <div className="compare-table" data-testid="comparison-table" style={{ "--columns": agents.length } as React.CSSProperties}>
+    {loadError && <div className="integration-notice" data-testid="comparison-load-error"><AlertTriangle size={16} /><strong>{loadError}</strong></div>}
+    {loading
+      ? <div className="compare-loading" data-testid="comparison-loading"><Skeleton className="h-64" /></div>
+      : agents.length < 2
+        ? <div className="empty-state" data-testid="comparison-unavailable"><AlertTriangle size={28} /><h3>Not enough agents to compare</h3><p>The selected agents could not be loaded from the registry. Clear the selection and pick again.</p><Button variant="outline" onClick={clear}>Clear selection</Button></div>
+        : <div className="compare-table" data-testid="comparison-table" style={{ "--columns": agents.length } as React.CSSProperties}>
       <div className="compare-row compare-head">
         <div className="compare-label">Agent</div>
         {agents.map(agent => <div className="compare-value compare-agent-head" key={agent.id}>
@@ -64,6 +82,6 @@ export default function ComparePage() {
       <Row label="x402 claim" agents={agents} render={a => a.x402_supported ? "Declared" : "Not declared"} />
       <Row label="Protocols" agents={agents} render={a => <div className="compare-caps">{a.supported_protocols.length ? a.supported_protocols.map(x => <span key={x}><CheckCircle2 size={13} />{x}</span>) : <span>None declared</span>}</div>} />
       <div className="compare-row compare-cta"><div className="compare-label" />{agents.map(a => <div className="compare-value" key={a.id}><Button data-testid={`details-from-compare-${a.id}`} asChild><Link to={`/onchain/mainnet/${a.token_id}`}>View details</Link></Button></div>)}</div>
-    </div>
+        </div>}
   </div>;
 }

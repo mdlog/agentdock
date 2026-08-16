@@ -177,6 +177,45 @@ def substitute_agent_id(url: str, token_id: int | None) -> str:
     return url
 
 
+# Which parameterless tools may be called on the user's behalf when the agent
+# has no conversational tool. Two gates, both required: the name must look
+# read-only, and must not contain anything that smells like a state change.
+# The mutation list wins on conflict — a tool named "get_and_execute" is out.
+_READONLY_PREFIXES = ("get", "list", "show", "read", "query", "stats", "overview",
+                      "recommend", "top_", "info", "describe", "fetch", "check")
+_MUTATION_WORDS = ("build", "swap", "borrow", "repay", "mint", "redeem", "deposit",
+                   "withdraw", "vote", "claim", "stake", "transfer", "approve",
+                   "execute", "send", "create", "cancel", "sign", "buy", "sell",
+                   "pay", "bridge", "delete", "update", "set_")
+
+
+def _safe_readonly_call(tool: dict[str, Any]) -> dict[str, Any] | None:
+    """Return arguments for a tool that is safe to call without being asked, or
+    None. Safe means: read-only by name, and either no required arguments at
+    all, or a single required array whose enum names this chain — the one value
+    we can fill without guessing.
+    """
+    raw = str(tool.get("name") or "")
+    name = raw.lower().lstrip("_")
+    stripped = name.split("_", 1)[1] if "_" in name and not name.startswith(_READONLY_PREFIXES) else name
+    if any(word in name for word in _MUTATION_WORDS):
+        return None
+    if not (name.startswith(_READONLY_PREFIXES) or stripped.startswith(_READONLY_PREFIXES)):
+        return None
+    schema = tool.get("inputSchema") or {}
+    required = schema.get("required") or []
+    if not required:
+        return {}
+    if len(required) == 1:
+        prop = (schema.get("properties") or {}).get(required[0]) or {}
+        if prop.get("type") == "array":
+            enum = (prop.get("items") or {}).get("enum") or []
+            match = next((v for v in enum if str(v).lower() in ("bsc", "bnb", "bnbchain", "bnb chain", "binance")), None)
+            if match:
+                return {required[0]: [match]}
+    return None
+
+
 def _is_agent_card(url: str) -> bool:
     low = url.split("?")[0].lower().rstrip("/")
     return "/.well-known/" in low or low.endswith("agent-card.json") or low.endswith("agent.json") or low.endswith("/card")
@@ -266,7 +305,30 @@ async def call_mcp(url: str, objective: str) -> dict[str, Any]:
             if not text.strip() or text.strip() in ("{}", "[]", "null"):
                 raise AgentRejected(f"The agent's {chat['name']} tool returned an empty answer.", reason="empty")
             return {"transport": "mcp", "tool": chat["name"], "tools": names, "output": text[:4000]}
-        # No conversational tool: the agent's real, callable capabilities ARE the result.
+        # No conversational tool. Before falling back to a listing, call the
+        # tools that are safe to call unasked — read-only by name, and needing
+        # no argument we would have to invent. Their live output is a far
+        # better answer than a menu, and it is what the agent actually does.
+        outputs = []
+        for tool in tools:
+            args = _safe_readonly_call(tool)
+            if args is None:
+                continue
+            try:
+                called = await _post(client, url, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": tool["name"], "arguments": args}}, session)
+                result = _unwrap(_sse_or_json(called.text), f"{tool['name']} tool")
+                if result.get("isError"):
+                    continue
+                text = "\n".join(c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text").strip()
+                if text and text not in ("{}", "[]", "null"):
+                    outputs.append(f"── {tool['name']}\n{text[:1600]}")
+            except (AgentRejected, AgentPaymentRequired):
+                continue
+            if len(outputs) >= 2:
+                break
+        if outputs:
+            return {"transport": "mcp", "tool": "readonly", "tools": names, "output": "\n\n".join(outputs)[:4000]}
         summary = "This agent exposes the following live tools:\n" + "\n".join(
             f"• {t.get('name')}: {str(t.get('description') or '')[:100]}" for t in tools[:20]) if tools else "The agent responded but declared no callable tools."
         return {"transport": "mcp", "tools": names, "output": summary}

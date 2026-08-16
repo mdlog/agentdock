@@ -509,3 +509,60 @@ async def test_agent_reachable_at_the_named_path_is_live(monkeypatch, public_hos
     status, _note = await agent_client.probe_endpoint("a2a", "https://api.example/api/a2a", 7)
 
     assert status == "live"
+
+
+# --- when there is no chat tool, safe read-only tools ARE the answer ---------
+
+def test_safe_call_zero_arg_read_tool():
+    assert agent_client._safe_readonly_call({"name": "topaz_get_protocol_stats", "inputSchema": {"required": []}}) == {}
+
+
+def test_safe_call_fills_a_chain_enum():
+    tool = {"name": "getVaultsWithChains", "inputSchema": {
+        "required": ["chainNames"],
+        "properties": {"chainNames": {"type": "array", "items": {"enum": ["ethereum", "bsc", "base"]}}}}}
+
+    assert agent_client._safe_readonly_call(tool) == {"chainNames": ["bsc"]}
+
+
+@pytest.mark.parametrize("name", ["borrow", "topaz_build_swap_calldata", "get_and_execute", "claimRewards", "setConfig"])
+def test_mutating_tools_are_never_called_unasked(name):
+    assert agent_client._safe_readonly_call({"name": name, "inputSchema": {"required": []}}) is None
+
+
+def test_tools_needing_unknowable_args_are_skipped():
+    tool = {"name": "getBorrowBalance", "inputSchema": {"required": ["chainName", "userAddress"]}}
+
+    assert agent_client._safe_readonly_call(tool) is None
+
+
+@pytest.mark.anyio
+async def test_mcp_without_chat_calls_safe_tools_and_returns_their_output(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+            {"name": "borrow", "inputSchema": {"required": []}},
+            {"name": "get_protocol_stats", "inputSchema": {"required": []}},
+        ]}}),
+        _response({"jsonrpc": "2.0", "id": 4, "result": {"content": [{"type": "text", "text": '{"tvlUsd": "1117243"}'}]}}),
+    ])
+
+    result = await agent_client.call_mcp("https://agent.example/rpc", "yield overview?")
+
+    assert "1117243" in result["output"]
+    assert result["tool"] == "readonly"
+
+
+@pytest.mark.anyio
+async def test_mcp_falls_back_to_the_listing_when_nothing_is_safe(monkeypatch, public_host):
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+            {"name": "borrow", "description": "Borrow a token", "inputSchema": {"required": ["amount"]}},
+        ]}}),
+    ])
+
+    result = await agent_client.call_mcp("https://agent.example/rpc", "hello")
+
+    assert "borrow" in result["output"]
+    assert "live tools" in result["output"]

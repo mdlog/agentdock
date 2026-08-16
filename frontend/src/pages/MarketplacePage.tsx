@@ -90,10 +90,13 @@ export default function MarketplacePage() {
     <CategoryBrowse categories={categories} selected={category} onSelect={selectCategory} />
 
     <nav className="source-switch" data-testid="source-switch" aria-label="Agent source">
+      {/* The source each option names is spelled out in the section kicker
+          directly below it ("Pay per call · b402 Bazaar"), so the control
+          itself only needs the choice and its size. */}
       {([
-        { key: "all", label: "All sources", note: "Both registries", count: null },
-        { key: "b402", label: "Pay per call", note: "b402 Bazaar · charges per call", count: visiblePayable.length },
-        { key: "onchain", label: "Onchain identities", note: "8004scan · free to activate", count: loadError ? null : total },
+        { key: "all", label: "All sources", count: null },
+        { key: "b402", label: "Pay per call", count: visiblePayable.length },
+        { key: "onchain", label: "Onchain", count: loadError ? null : total },
       ] as const).map(option =>
         <button
           key={option.key}
@@ -103,8 +106,7 @@ export default function MarketplacePage() {
           aria-pressed={source === option.key}
           onClick={() => setSource(option.key)}
         >
-          <strong>{option.label}{option.count !== null && <em>{option.count.toLocaleString()}</em>}</strong>
-          <span>{option.note}</span>
+          {option.label}{option.count !== null && <em>{option.count.toLocaleString()}</em>}
         </button>)}
     </nav>
 

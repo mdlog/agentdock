@@ -312,6 +312,23 @@ class Scan8004Client:
 VOLATILE_FROM_DETAIL = ("rank", "network_rank", "total_score", "health_score", "average_score")
 
 
+def catalogue_write(projection: dict, raw: dict) -> dict:
+    """The upsert body for one catalogue row.
+
+    Name-derived categories are a guess made before anyone called the agent.
+    They seed a new row, but must not overwrite what a live tool list
+    established: "Fly Marketing Agent" kept snapping back into yield
+    optimisation on every 10-minute head sync because its blurb says
+    "optimization", minutes after the hourly sweep had filed it correctly from
+    its real tools. Same clobber shape as the rank bug, same cure — a guess
+    never overwrites evidence.
+    """
+    body = durable(projection)
+    guessed = body.pop("categories", None) or []
+    return {"$set": {**body, "raw_8004scan": raw, "synced_at": utc_now()},
+            "$setOnInsert": {"categories": guessed, "categories_from": "name"}}
+
+
 def durable(projection: dict) -> dict:
     """The projection with detail-only fields dropped where the source had none.
 
@@ -494,7 +511,7 @@ async def _sync_agents(db, chain_id: int, is_testnet: bool) -> dict:
             projection = public_projection(raw, chain_id, is_testnet)
             await db.scan_agents.update_one(
                 {"chain_id": chain_id, "token_id": projection["token_id"]},
-                {"$set": {**durable(projection), "raw_8004scan": raw, "synced_at": utc_now()}},
+                catalogue_write(projection, raw),
                 upsert=True,
             )
             imported += 1
@@ -570,7 +587,7 @@ async def sync_all_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
                 projection = public_projection(raw, chain_id, bool(raw.get("is_testnet")))
                 ops.append(UpdateOne(
                     {"chain_id": chain_id, "token_id": projection["token_id"]},
-                    {"$set": {**durable(projection), "raw_8004scan": raw, "synced_at": utc_now()}},
+                    catalogue_write(projection, raw),
                     upsert=True,
                 ))
             await db.scan_agents.bulk_write(ops, ordered=False)
@@ -634,7 +651,7 @@ async def sync_new_agents(db, chain_id: int = MAINNET_CHAIN_ID, page_size: int =
                 projection = public_projection(raw, chain_id, bool(raw.get("is_testnet")))
                 ops.append(UpdateOne(
                     {"chain_id": chain_id, "token_id": projection["token_id"]},
-                    {"$set": {**durable(projection), "raw_8004scan": raw, "synced_at": utc_now()}},
+                    catalogue_write(projection, raw),
                     upsert=True,
                 ))
             outcome = await db.scan_agents.bulk_write(ops, ordered=False)

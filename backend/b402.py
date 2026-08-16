@@ -288,6 +288,28 @@ async def call_paid(url: str, header: str, method: str = "GET", params: dict | N
     return response
 
 
+async def check_resource(url: str) -> tuple[bool, str]:
+    """Whether a bazaar resource actually answers with payment terms.
+
+    A payable resource's whole contract is: request it, get a 402 with terms.
+    Anything else — a 404, a timeout, an empty 200 — means the listing cannot
+    be hired, and the catalogue should say so rather than let the visitor
+    discover it at the final step.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+            response = await client.get(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    except httpx.HTTPError as exc:
+        return False, f"{type(exc).__name__}: {exc}"[:200]
+    if response.status_code == 402:
+        return True, "Answered 402 with payment terms"
+    # A 2xx means the resource serves without payment — odd for a paid listing,
+    # but a visitor can still use it, so it is not a dead end.
+    if response.status_code < 300:
+        return True, f"Answered HTTP {response.status_code} without requiring payment"
+    return False, f"Answered HTTP {response.status_code} instead of payment terms"
+
+
 async def fetch_bazaar(limit: int = 100, max_pages: int = 20) -> list[dict[str, Any]]:
     """Discovery only. Terms are never taken from here — see fetch_challenge.
 

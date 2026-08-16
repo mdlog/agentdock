@@ -715,8 +715,8 @@ def test_arguments_that_mean_the_caller_are_filled(arg):
 
 # --- a live tool list outranks the name an agent filed itself under ----------
 
-from scan8004 import (declared_services, derive_categories_from_capabilities, durable,
-                      effective_categories, public_projection)
+from scan8004 import (catalogue_write, declared_services, derive_categories_from_capabilities,
+                      durable, effective_categories, public_projection)
 
 
 def test_tools_classify_an_agent_its_name_misfiled():
@@ -990,3 +990,20 @@ def test_the_browse_grid_lists_a_shared_gateway_once():
 
     for fn in (server.marketplace_pulse, server.marketplace_verified, server.list_categories):
         assert '"endpoint_primary": {"$ne": False}' in inspect.getsource(fn), fn.__name__
+
+
+def test_catalogue_sync_seeds_categories_but_never_overwrites_evidence():
+    """Name-derived categories are a guess. They seed a new row and must not
+    overwrite what a live tool list established — Fly Marketing Agent kept
+    snapping back into yield-optimisation on every 10-minute head sync."""
+    raw = {"chain_id": 56, "token_id": 91852, "name": "Fly Marketing Agent",
+           "description": "performance optimization for shops", "supported_protocols": []}
+    projection = public_projection(raw, 56, False)
+
+    update = catalogue_write(projection, raw)
+
+    assert "categories" not in update["$set"]
+    assert update["$setOnInsert"]["categories"] == projection["categories"]
+    assert update["$setOnInsert"]["categories_from"] == "name"
+    # Everything else still syncs on every pass.
+    assert update["$set"]["name"] == "Fly Marketing Agent"

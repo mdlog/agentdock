@@ -20,6 +20,13 @@ export const B402ResourceCard = ({ resource }: { resource: B402Resource }) => (
       <Badge className="x402-badge"><Zap size={10} /> x402</Badge>
     </div>
 
+    {/* A listing that answers 404 instead of payment terms cannot be hired;
+        saying so here beats letting the visitor discover it at the last step. */}
+    {resource.reachable === false && (
+      <span className="peer-badge" data-testid={`b402-unreachable-${resource.id}`}>
+        Not answering · {resource.reachability_note || "no payment terms served"}
+      </span>
+    )}
     <p data-testid={`b402-description-${resource.id}`}>{resource.description}</p>
     <div className="protocol-list">
       <span>{resource.type?.toUpperCase() || "HTTP"}</span>
@@ -33,9 +40,11 @@ export const B402ResourceCard = ({ resource }: { resource: B402Resource }) => (
         <span>Price per call</span>
       </div>
       <div className="card-actions">
-        <Button data-testid={`hire-b402-${resource.id}`} size="sm" asChild>
-          <Link to={`/hire/${resource.id}`}>Hire <ArrowUpRight size={14} /></Link>
-        </Button>
+        {resource.reachable === false
+          ? <Button data-testid={`hire-b402-${resource.id}`} size="sm" disabled>Not answering</Button>
+          : <Button data-testid={`hire-b402-${resource.id}`} size="sm" asChild>
+              <Link to={`/hire/${resource.id}`}>Hire <ArrowUpRight size={14} /></Link>
+            </Button>}
       </div>
     </div>
 

@@ -147,7 +147,15 @@ async def sync_b402_catalog() -> dict:
         items = await __import__("asyncio").wait_for(b402.fetch_bazaar(limit=100), timeout=60)
         projected = [p for p in (b402.bazaar_projection(item) for item in items) if p]
         for row in projected:
-            await db.b402_resources.update_one({"id": row["id"]}, {"$set": {**row, "synced_at": now_iso()}}, upsert=True)
+            # A catalogue listing is a merchant's claim. Asking the resource for
+            # its 402 terms is the test: one listed endpoint answers 404 with no
+            # terms at all, and a visitor who picks it dead-ends at the last
+            # step. The card says "not answering" instead.
+            reachable, note = await b402.check_resource(row["resource"])
+            await db.b402_resources.update_one(
+                {"id": row["id"]},
+                {"$set": {**row, "reachable": reachable, "reachability_note": note, "synced_at": now_iso()}},
+                upsert=True)
         # Recorded rather than silently dropped: a listing is skipped when it is
         # served over plain HTTP or accepts payment only off BNB Chain, and the
         # difference between listed and imported should be explainable.
@@ -522,7 +530,8 @@ async def list_categories(network: str = "mainnet"):
         # here, so both are published and the card leads with the honest one.
         ready = await db.scan_agents.count_documents(
             {**scope, "activatable": True, "endpoint_primary": {"$ne": False}})
-        payable = await db.b402_resources.count_documents({"categories": cat["key"]})
+        payable = await db.b402_resources.count_documents(
+            {"categories": cat["key"], "reachable": {"$ne": False}})
         items.append({"key": cat["key"], "label": cat["label"], "blurb": cat["blurb"],
                       "count": count, "ready": ready, "payable": payable})
     total_tagged = await db.scan_agents.count_documents({"chain_id": chain_id, "categories": {"$ne": []}})

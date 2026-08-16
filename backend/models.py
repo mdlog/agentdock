@@ -126,6 +126,9 @@ class ScanAgentList(BaseModel):
     total: int
     # How many of `total` have a verified, callable endpoint.
     ready_total: int = 0
+    # True when `total` is a floor rather than the exact figure, because
+    # counting the match exactly would have meant walking the collection.
+    total_capped: bool = False
     source: str = "8004scan"
     chain_id: int = 56
     is_testnet: bool = False

@@ -22,6 +22,9 @@ export default function MarketplacePage() {
   const [onchain, setOnchain] = useState<OnchainAgent[]>([]);
   const [total, setTotal] = useState(0);
   const [readyTotal, setReadyTotal] = useState(0);
+  // True when the count is a floor: an unindexed substring search stops
+  // counting past a ceiling rather than walking 256k documents.
+  const [totalCapped, setTotalCapped] = useState(false);
   const [offset, setOffset] = useState(0);
   const [payable, setPayable] = useState<B402Resource[]>([]);
   const [categories, setCategories] = useState<AgentCategory[]>([]);
@@ -52,7 +55,7 @@ export default function MarketplacePage() {
     // Searching, filtering and sorting all happen server-side: the browser only
     // ever holds one page.
     api.get(`/onchain/agents?${params}`)
-      .then(o => { setOnchain(o.data.items); setTotal(o.data.total); setReadyTotal(o.data.ready_total ?? 0); setLoadError(""); })
+      .then(o => { setOnchain(o.data.items); setTotal(o.data.total); setReadyTotal(o.data.ready_total ?? 0); setTotalCapped(Boolean(o.data.total_capped)); setLoadError(""); })
       .catch(e => { setOnchain([]); setTotal(0); setReadyTotal(0); setLoadError(messageFromError(e)); })
       .finally(() => setLoading(false));
   }, [debounced, protocol, sort, offset, category, retry]);
@@ -88,7 +91,7 @@ export default function MarketplacePage() {
     </section>}
 
     <section className="catalog-section">
-      <div className="catalog-heading"><div><p className="section-kicker">Onchain identities · 8004scan</p><h2 data-testid="catalog-heading">{activeCat ? `${activeCat.label} agents` : "All onchain agents on BNB Chain"}</h2><p className="section-note" data-testid="onchain-hire-note">{activeCat ? activeCat.blurb + " Discovered from 8004scan by each agent's own onchain metadata." : "Discovered from 8004scan. Pick a category above to narrow to agents that do a specific job."}</p></div><span data-testid="agent-result-count">{loadError ? "Count unavailable" : <><strong data-testid="agent-ready-count">{readyTotal}</strong> ready to hire · {total.toLocaleString()} registered</>}</span></div>
+      <div className="catalog-heading"><div><p className="section-kicker">Onchain identities · 8004scan</p><h2 data-testid="catalog-heading">{activeCat ? `${activeCat.label} agents` : "All onchain agents on BNB Chain"}</h2><p className="section-note" data-testid="onchain-hire-note">{activeCat ? activeCat.blurb + " Discovered from 8004scan by each agent's own onchain metadata." : "Discovered from 8004scan. Pick a category above to narrow to agents that do a specific job."}</p></div><span data-testid="agent-result-count">{loadError ? "Count unavailable" : <><strong data-testid="agent-ready-count">{readyTotal}</strong> ready to hire · {total.toLocaleString()}{totalCapped ? "+" : ""} registered</>}</span></div>
       <div className="filter-bar" data-testid="agent-filter-bar">
         <Select value={protocol} onValueChange={v => { setProtocol(v); setOffset(0); }}><SelectTrigger data-testid="protocol-filter"><SelectValue placeholder="Protocol" /></SelectTrigger><SelectContent><SelectItem data-testid="protocol-all" value="all">All protocols</SelectItem>{protocols.map(p => <SelectItem data-testid={`protocol-${p.toLowerCase()}`} value={p} key={p}>{p}</SelectItem>)}</SelectContent></Select>
         <Select value={sort} onValueChange={v => { setSort(v); setOffset(0); }}><SelectTrigger data-testid="sort-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem data-testid="sort-ready" value="ready">Ready to hire first</SelectItem><SelectItem data-testid="sort-score" value="score">8004scan score</SelectItem><SelectItem data-testid="sort-rank" value="rank">Network rank</SelectItem><SelectItem data-testid="sort-feedback" value="feedback">Feedback volume</SelectItem></SelectContent></Select>

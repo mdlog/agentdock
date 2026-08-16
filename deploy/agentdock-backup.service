@@ -1,0 +1,7 @@
+[Unit]
+Description=AgentDock database snapshot
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/mdlog/Project-MDlabs/agentdock/scripts/backup_mongo.sh

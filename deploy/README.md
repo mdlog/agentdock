@@ -30,6 +30,20 @@ what the public sees. Filenames are content-hashed, so a new build invalidates
 Cloudflare's cache by itself; `index.html` is served `no-cache` so it always
 names the current bundle.
 
+## Backups
+
+`agentdock-backup.timer` snapshots MongoDB daily, keeping the last seven.
+Re-syncing the 256k catalogue costs about an hour of a sponsor's rate limit;
+the tasks and audit trail cannot be re-derived at all.
+
+```bash
+cp deploy/agentdock-backup.* ~/.config/systemd/user/
+systemctl --user enable --now agentdock-backup.timer
+./scripts/backup_mongo.sh                              # or run one now
+```
+
+Restore: `docker exec -i agentdock-mongo mongorestore --archive --gzip --drop < <snapshot>`
+
 ## Checks
 
 ```bash

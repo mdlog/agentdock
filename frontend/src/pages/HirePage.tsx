@@ -3,13 +3,13 @@ import { AlertTriangle, ArrowLeft, Globe2, Loader2, LockKeyhole, Zap } from "luc
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { AGENT_CALL, api, messageFromError } from "@/lib/api";
-import type { B402Resource, OnchainAgent } from "@/types";
+import type { AgentAction, B402Resource, OnchainAgent } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { UNAVAILABLE, UNCHECKED } from "@/components/OnchainAgentCard";
-import { FlowRail, FREE_FLOW, PAID_FLOW } from "@/components/FlowRail";
+import { ACTION_FLOW, FlowRail, FREE_FLOW, PAID_FLOW } from "@/components/FlowRail";
 import { WalletButton } from "@/components/WalletButton";
 import { useAccount } from "wagmi";
 
@@ -41,8 +41,27 @@ export default function HirePage() {
   const [view, setView] = useState<HireView | null>(null);
   const [loadError, setLoadError] = useState("");
   const [objective, setObjective] = useState("");
+  // What this agent can actually be asked to do. For an MCP agent the typed
+  // text is never transmitted unless it declares a chat tool — none of the live
+  // ones do — so offering a box that says otherwise was simply untrue.
+  const [actions, setActions] = useState<AgentAction[]>([]);
+  const [action, setAction] = useState<string | null>(null);
+  const [declaredTotal, setDeclaredTotal] = useState(0);
   const [creating, setCreating] = useState(false);
   const isOnchain = resourceId.startsWith("bsc-");
+
+  useEffect(() => {
+    if (!isOnchain) return;
+    const token = resourceId.split("-")[2];
+    const query = address ? `?wallet=${address}` : "";
+    api.get(`/onchain/agents/${token}/actions${query}`)
+      .then(r => {
+        setActions(r.data.actions || []);
+        setDeclaredTotal(r.data.declared_total || 0);
+        setAction(prev => prev ?? (r.data.actions?.[0]?.name ?? null));
+      })
+      .catch(() => setActions([]));
+  }, [resourceId, isOnchain, address]);
 
   useEffect(() => {
     if (isOnchain) {
@@ -75,7 +94,13 @@ export default function HirePage() {
   const createTask = async () => {
     setCreating(true);
     try {
-      const r = await api.post("/tasks", { agent_id: resourceId, objective, constraints: "", wallet_address: address ?? null }, AGENT_CALL);
+      const r = await api.post("/tasks", {
+        agent_id: resourceId,
+        // An agent that runs a named action still needs an objective recorded,
+        // so the audit trail says what was asked for.
+        objective: action ? `Run ${action}` : objective,
+        constraints: "", wallet_address: address ?? null, action,
+      }, AGENT_CALL);
       navigate(`/tasks/${r.data.id}`);
     } catch (e) {
       toast.error(messageFromError(e));
@@ -90,7 +115,7 @@ export default function HirePage() {
   return <div className="page-wrap hire-page">
     <Link to="/" className="back-link" data-testid="back-to-marketplace"><ArrowLeft size={15} /> Back to marketplace</Link>
 
-    <FlowRail steps={view.paid ? PAID_FLOW : FREE_FLOW} current={0} testId="hire-flow-rail" />
+    <FlowRail steps={view.paid ? PAID_FLOW : actions.length ? ACTION_FLOW : FREE_FLOW} current={0} testId="hire-flow-rail" />
 
     <section className="agent-profile-band">
       <AgentAvatar name={view.iconName} size={68} testId="hire-avatar" className="profile-avatar" src={view.iconSrc} />
@@ -120,7 +145,9 @@ export default function HirePage() {
             <p>{view.paid
               ? "AgentDock never holds a key. The merchant quotes its price when the task runs; the exact token, amount and recipient are shown before your wallet is asked to sign anything."
               : view.runnable
-                ? "This agent exposes a live endpoint and does not charge. AgentDock calls it with your objective and returns the real result — no signature, no payment."
+                ? (actions.length
+                    ? "This agent exposes a live endpoint and does not charge. AgentDock calls the action you pick and returns exactly what it answers — no signature, no payment."
+                    : "This agent exposes a live endpoint and does not charge. AgentDock sends your request to it and returns the real result — no signature, no payment.")
                 : view.blockedReason}</p>
           </div>
         </section>
@@ -128,13 +155,29 @@ export default function HirePage() {
 
       <aside className="task-panel" data-testid="hire-composer">
         <div className="task-panel-heading"><span><Zap size={14} /> {view.paid ? "Hire agent" : "Activate agent"}</span><strong>{view.paid ? "Pay per call" : "Free"}</strong></div>
+        {actions.length > 0 ? <>
+          <label>Choose what to run</label>
+          <div className="action-list" data-testid="hire-action-list">
+            {actions.map(a =>
+              <button
+                type="button"
+                key={a.name}
+                data-testid={`hire-action-${a.name}`}
+                className={action === a.name ? "selected" : ""}
+                onClick={() => setAction(a.name)}
+              >
+                <strong>{a.name}{a.uses_wallet && <em>uses your address</em>}</strong>
+                <span>{a.description}</span>
+              </button>)}
+          </div>
+          <p className="action-note" data-testid="hire-action-note">
+            {actions.length} of {declaredTotal} tools this agent declares are read-only and need no argument AgentDock would have to invent.
+            {!address && " Connect a wallet to unlock the ones that report on your own positions."}
+          </p>
+        </> : <>
         <label htmlFor="objective">What should the agent do?</label>
         <Textarea id="objective" data-testid="hire-objective-input" value={objective} onChange={e => setObjective(e.target.value)} rows={5} placeholder="Describe the request. It is sent to the agent as its query." />
-        {view.suggestions.length > 0 && <div className="objective-suggestions" data-testid="hire-suggestions">
-          <span>Or start with something this agent offers:</span>
-          {view.suggestions.map((s, i) =>
-            <button type="button" key={i} data-testid={`hire-suggestion-${i}`} onClick={() => setObjective(s)}>{s}</button>)}
-        </div>}
+        </>}
         <div className="transaction-preview">
           <h3>Before you run</h3>
           <div><span>Network</span><strong>BNB Chain · 56</strong></div>
@@ -143,8 +186,8 @@ export default function HirePage() {
           <div><span>Permissions</span><strong>{view.paid ? "Single payment · no approval" : "Read-only call · no signature"}</strong></div>
         </div>
         {!address && view.paid && <WalletButton />}
-        <Button data-testid="create-hire-task-button" className="w-full" onClick={createTask} disabled={!view.runnable || creating || objective.trim().length < 12}>
-          {creating ? <><Loader2 size={15} className="spin" /> Creating task…</> : !view.runnable ? "Cannot be run" : view.paid ? "Create task & get price" : "Create task & run"}
+        <Button data-testid="create-hire-task-button" className="w-full" onClick={createTask} disabled={!view.runnable || creating || (!action && objective.trim().length < 12)}>
+          {creating ? <><Loader2 size={15} className="spin" /> Creating task…</> : !view.runnable ? "Cannot be run" : view.paid ? "Create task & get price" : action ? `Run ${action}` : "Create task & run"}
         </Button>
         {!view.runnable && <p className="payment-locked" data-testid="hire-blocked-reason"><AlertTriangle size={14} /> {view.blockedReason}</p>}
         {objective.trim().length > 0 && objective.trim().length < 12 && <p className="payment-locked" data-testid="hire-objective-warning"><AlertTriangle size={14} /> Describe the request in at least 12 characters.</p>}

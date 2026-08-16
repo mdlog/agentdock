@@ -14,6 +14,10 @@ TaskState = Literal["created", "payment_pending", "paid", "running", "completed"
 class TaskCreate(BaseModel):
     agent_id: str
     objective: str = Field(min_length=12, max_length=1000)
+    # A named tool the visitor picked from this agent's own declared actions.
+    # Validated server-side against that agent's capabilities — a name arriving
+    # from a browser is never passed to tools/call on trust.
+    action: str | None = Field(default=None, max_length=80)
     constraints: str = Field(default="", max_length=600)
     wallet_address: str | None = None
 
@@ -43,6 +47,7 @@ class TaskRecord(BaseModel):
     result_preview: str | None = None
     failure_reason: str | None = None
     endpoint_kind: str | None = None
+    agent_action: str | None = None
     quote_id: str | None = None
     quote_expires_at: str | None = None
     tx_hash: str | None = None
@@ -105,7 +110,9 @@ class ScanAgent(BaseModel):
     # live | auth | payment | dead | error | none — the verdict of a real probe,
     # so the card can say why an agent cannot be activated instead of guessing.
     # What a live agent declares it can do, taken from its own tool list.
-    capabilities: list[dict[str, str]] = Field(default_factory=list)
+    # dict[str, Any] because input_schema is a JSON Schema object, not a string:
+    # typing it as str turned every live agent's detail response into a 500.
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)
     # Read-only openers drawn from those capabilities, so a newcomer is not
     # handed an empty box for an agent they have never met.
     suggested_objectives: list[str] = Field(default_factory=list)

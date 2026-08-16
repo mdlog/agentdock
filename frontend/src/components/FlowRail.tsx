@@ -16,6 +16,15 @@ export const PAID_FLOW: FlowStep[] = [
   { key: "completed", label: "Result", hint: "The agent replies" },
 ];
 
+// An MCP agent without a chat tool never receives free text — it runs a named
+// tool. Calling that first step "Describe" would name something that does not
+// happen.
+export const ACTION_FLOW: FlowStep[] = [
+  { key: "created", label: "Choose", hint: "Pick an action" },
+  { key: "running", label: "Run", hint: "We call the endpoint" },
+  { key: "completed", label: "Result", hint: "The agent replies" },
+];
+
 export const FREE_FLOW: FlowStep[] = [
   { key: "created", label: "Describe", hint: "Say what you need" },
   { key: "running", label: "Run", hint: "We call the endpoint" },

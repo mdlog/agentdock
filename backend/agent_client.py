@@ -190,8 +190,12 @@ _MUTATION_WORDS = ("build", "swap", "borrow", "repay", "mint", "redeem", "deposi
 
 
 _CHAIN_NAMES = ("bsc", "bnb", "bnbchain", "bnb chain", "binance")
-_ADDRESS_ARGS = ("useraddress", "user_address", "walletaddress", "wallet_address",
-                 "address", "account", "wallet", "owner", "user")
+# Arguments that mean "the person asking". Deliberately exact rather than
+# suffix-matched: `reserveAddress`, `tokenAddress` and `poolAddress` all end in
+# "address" but name a contract, and filling one with the caller's wallet
+# produced a live failure ("Reserve not found") that read as the agent's fault.
+_ADDRESS_ARGS = ("useraddress", "walletaddress", "owneraddress", "payeraddress",
+                 "accountaddress", "address", "account", "wallet", "owner", "user", "taker")
 
 
 def _fill_argument(arg: str, prop: dict[str, Any], wallet: str | None):
@@ -202,8 +206,9 @@ def _fill_argument(arg: str, prop: dict[str, Any], wallet: str | None):
     enum naming this chain takes that value; anything else is unknowable and
     disqualifies the tool.
     """
-    low = arg.lower().replace("-", "_")
-    if wallet and any(low == a or low.endswith(a) for a in _ADDRESS_ARGS):
+    low = arg.lower().replace("-", "").replace("_", "")
+    # Exact match only. A suffix match reads "reserveAddress" as the caller.
+    if wallet and low in _ADDRESS_ARGS:
         return wallet
     enum = prop.get("enum") or (prop.get("items") or {}).get("enum") or []
     match = next((v for v in enum if str(v).lower() in _CHAIN_NAMES), None)
@@ -295,7 +300,7 @@ async def _post(client: httpx.AsyncClient, url: str, payload: dict, session: str
     return response
 
 
-async def call_mcp(url: str, objective: str, wallet: str | None = None) -> dict[str, Any]:
+async def call_mcp(url: str, objective: str, wallet: str | None = None, action: str | None = None) -> dict[str, Any]:
     """initialize -> tools/list -> call a chat-like tool if present, else report tools."""
     await _assert_public_https(url)
     async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
@@ -306,6 +311,27 @@ async def call_mcp(url: str, objective: str, wallet: str | None = None) -> dict[
         listed = await _post(client, url, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, session)
         tools = _unwrap(_sse_or_json(listed.text), "tools/list").get("tools") or []
         names = [t.get("name") for t in tools]
+        # An explicitly chosen action wins: the visitor picked it by name, and it
+        # was validated against this agent's own tool list before we got here.
+        if action:
+            chosen = next((t for t in tools if t.get("name") == action), None)
+            if not chosen:
+                raise AgentRejected(f"This agent no longer declares {action}.", reason="upstream_error")
+            args = _safe_readonly_call(chosen, wallet)
+            if args is None:
+                raise AgentRejected(f"{action} is not something AgentDock can run on your behalf.", reason="upstream_error")
+            called = await _post(client, url, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": action, "arguments": args}}, session)
+            result = _unwrap(_sse_or_json(called.text), f"{action} tool")
+            text = "\n".join(c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text").strip()
+            if result.get("isError"):
+                raise AgentRejected(f"The agent's {action} tool reported an error: {text or 'no detail given'}", reason="upstream_error")
+            if not text:
+                text = json.dumps(result)[:2000]
+            if text.strip() in ("{}", "[]", "null", ""):
+                raise AgentRejected(f"The agent's {action} tool returned an empty answer.", reason="empty")
+            return {"transport": "mcp", "tool": action, "tools": names, "output": text[:4000]}
+
         chat = next((t for t in tools if t.get("name") in ("chat", "ask", "message", "query", "prompt")), None)
         if chat:
             arg_key = next(iter((chat.get("inputSchema") or {}).get("properties") or {"message": {}}), "message")
@@ -499,11 +525,32 @@ async def fetch_capabilities(kind: str, url: str, token_id: int | None = None) -
             tools = _unwrap(_sse_or_json(listed.text), "tools/list").get("tools") or []
         return [
             {"name": str(tool.get("name") or "")[:80],
-             "description": str(tool.get("description") or "")[:200]}
+             "description": str(tool.get("description") or "")[:200],
+             # Kept so the safety gate can be re-run at call time against the
+             # wallet the task carries, rather than trusted from a stored verdict.
+             "input_schema": tool.get("inputSchema") or {}}
             for tool in tools if tool.get("name")
         ][:40]
     except (AgentCallError, AgentPaymentRequired, httpx.HTTPError, OSError, ValueError):
         return []
+
+
+def runnable_actions(capabilities: list[dict[str, Any]], wallet: str | None = None) -> list[dict[str, Any]]:
+    """The tools AgentDock may call on a visitor's behalf, with their arguments.
+
+    The same gate the runtime uses, applied to stored capabilities: read-only by
+    name, no mutation words, and every required argument fillable without
+    inventing one. Returning the arguments too means the caller never has to
+    reconstruct them — and never has to trust a name supplied by a browser.
+    """
+    actions = []
+    for cap in capabilities:
+        name = str(cap.get("name") or "")
+        args = _safe_readonly_call({"name": name, "inputSchema": cap.get("input_schema") or {}}, wallet)
+        if args is None:
+            continue
+        actions.append({"name": name, "description": " ".join((cap.get("description") or "").split())[:200], "args": args})
+    return actions
 
 
 def suggested_objectives(capabilities: list[dict[str, str]]) -> list[str]:
@@ -529,7 +576,9 @@ def suggested_objectives(capabilities: list[dict[str, str]]) -> list[str]:
     return out
 
 
-async def call_agent(kind: str, url: str, objective: str, token_id: int | None = None, wallet: str | None = None) -> dict[str, Any]:
+async def call_agent(kind: str, url: str, objective: str, token_id: int | None = None,
+                     wallet: str | None = None, action: str | None = None) -> dict[str, Any]:
     if kind == "mcp":
-        return await call_mcp(substitute_agent_id(url, token_id), objective, wallet)
+        return await call_mcp(substitute_agent_id(url, token_id), objective, wallet, action)
+    # A2A does carry the objective: message/send transmits it verbatim.
     return await call_a2a(url, objective, token_id)

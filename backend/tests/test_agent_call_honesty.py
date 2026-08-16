@@ -640,3 +640,21 @@ def test_useless_descriptions_are_skipped():
 
 def test_an_agent_with_no_capabilities_offers_nothing_rather_than_inventing():
     assert agent_client.suggested_objectives([]) == []
+
+
+@pytest.mark.parametrize("arg", ["reserveAddress", "tokenAddress", "poolAddress", "contractAddress"])
+def test_a_contract_address_argument_is_not_the_callers_wallet(arg):
+    """Filling reserveAddress with the caller's wallet produced a live
+    "Reserve not found" that read as the agent failing, not us."""
+    tool = {"name": "getReserveHumanized", "inputSchema": {
+        "required": [arg], "properties": {arg: {"type": "string"}}}}
+
+    assert agent_client._safe_readonly_call(tool, wallet="0x" + "a" * 40) is None
+
+
+@pytest.mark.parametrize("arg", ["userAddress", "user_address", "walletAddress", "account", "owner", "taker"])
+def test_arguments_that_mean_the_caller_are_filled(arg):
+    tool = {"name": "getUserPositions", "inputSchema": {
+        "required": [arg], "properties": {arg: {"type": "string"}}}}
+
+    assert agent_client._safe_readonly_call(tool, wallet="0x" + "a" * 40) == {arg: "0x" + "a" * 40}

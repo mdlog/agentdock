@@ -8,7 +8,7 @@ import type { AuditEvent, Task, TypedData } from "@/types";
 import { Button } from "@/components/ui/button";
 import { WalletButton } from "@/components/WalletButton";
 import { DEFAULT_CHAIN } from "@/lib/erc8004";
-import { FlowRail, FREE_FLOW, PAID_FLOW } from "@/components/FlowRail";
+import { ACTION_FLOW, FlowRail, FREE_FLOW, PAID_FLOW } from "@/components/FlowRail";
 
 // Where the task sits on its rail. A free agent is never priced or signed, so
 // it runs the three-step flow; only a b402 task has a payment stage to be at.
@@ -93,7 +93,7 @@ export default function TaskPage() {
   if (!task) return <div className="page-wrap" data-testid="task-loading">Loading task…</div>;
 
   const paidFlow = !task.endpoint_kind;
-  const steps = paidFlow ? PAID_FLOW : FREE_FLOW;
+  const steps = paidFlow ? PAID_FLOW : task.agent_action ? ACTION_FLOW : FREE_FLOW;
   const failed = task.state === "failed" || task.state === "manual_resolution";
   // A failed task marks the step that actually failed, not step one: being
   // described succeeded, and a priced task that fails did so at signing.
@@ -111,7 +111,9 @@ export default function TaskPage() {
     {task.state === "created" && <section className="blocked-payment" data-testid="task-run-panel">
       <Play size={22} />
       {task.endpoint_kind
-        ? <><div><h2>Run this agent</h2><p>AgentDock calls the agent's live {task.endpoint_kind.toUpperCase()} endpoint with your objective and returns the real result. This agent does not charge — no signature, no payment.</p></div>
+        ? <><div><h2>{task.agent_action ? <>Run <code>{task.agent_action}</code></> : "Run this agent"}</h2><p>{task.agent_action
+            ? <>AgentDock calls this agent's <strong>{task.agent_action}</strong> tool on its live {task.endpoint_kind.toUpperCase()} endpoint and returns exactly what it answers. It does not charge — no signature, no payment.</>
+            : <>AgentDock sends your request to the agent's live {task.endpoint_kind.toUpperCase()} endpoint and returns the real result. This agent does not charge — no signature, no payment.</>}</p></div>
             <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? <><Loader2 size={15} className="spin" /> Running…</> : "Run agent"}</Button></>
         : <><div><h2>Ask the agent for its price</h2><p>AgentDock calls the endpoint once without paying. The merchant answers with the exact token, amount and recipient — nothing is signed at this step.</p></div>
             <Button data-testid="run-task-button" onClick={runTask} disabled={busy === "run"}>{busy === "run" ? <><Loader2 size={15} className="spin" /> Asking…</> : "Get price"}</Button></>}
@@ -139,7 +141,7 @@ export default function TaskPage() {
 
     <div className="task-grid">
       <section className="plain-section"><div className="section-title"><h2>Request</h2><FileSearch size={17} /></div><dl className="brief-list">
-        <div><dt>Objective</dt><dd data-testid="task-objective">{task.objective}</dd></div>
+        <div><dt>{task.agent_action ? "Action" : "Objective"}</dt><dd data-testid="task-objective">{task.agent_action ? <code>{task.agent_action}</code> : task.objective}</dd></div>
         <div><dt>Price</dt><dd data-testid="task-max-cost">{task.estimated_price_usd === null ? "Not quoted yet" : `${task.estimated_price_usd} ${terms?.asset_name ?? ""}`.trim()}</dd></div>
         <div><dt>Network</dt><dd data-testid="task-network">{DEFAULT_CHAIN.label} · {DEFAULT_CHAIN.chainId}</dd></div>
       </dl></section>

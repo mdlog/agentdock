@@ -454,6 +454,27 @@ async def list_onchain_agents(
                          chain_id=chain_id, is_testnet=is_testnet, offset=offset, limit=limit)
 
 
+@api.get("/onchain/agents/{token_id}/actions", tags=["agents"])
+async def onchain_agent_actions(token_id: int, network: str = "mainnet", wallet: str | None = None):
+    """What AgentDock can run on this agent, in the agent's own words.
+
+    Computed rather than stored, because the answer depends on the wallet: a
+    connected address unlocks the tools that report on the caller's own
+    positions, which is most of what a lending or LP agent is for.
+    """
+    chain_id = 97 if network == "testnet" else 56
+    agent = await db.scan_agents.find_one({"chain_id": chain_id, "token_id": token_id},
+                                          {"_id": 0, "capabilities": 1, "endpoint_kind": 1, "activatable": 1})
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+    actions = agent_client.runnable_actions(agent.get("capabilities") or [], wallet)
+    return {"actions": [{"name": a["name"], "description": a["description"],
+                         "uses_wallet": bool(wallet) and wallet in a["args"].values()} for a in actions],
+            "transport": agent.get("endpoint_kind"),
+            "declared_total": len(agent.get("capabilities") or []),
+            "activatable": bool(agent.get("activatable"))}
+
+
 @api.get("/onchain/agents/{token_id}", response_model=ScanAgent, tags=["agents"])
 async def get_onchain_agent(token_id: int, network: str = "mainnet"):
     if network not in ("mainnet", "testnet"):
@@ -596,6 +617,16 @@ async def create_task(payload: TaskCreate, request: Request):
         # Carried so a URL registered as a template can be resolved to this
         # agent at run time, exactly as the probe resolved it.
         extra = {"agent_endpoint": endpoint, "endpoint_kind": kind, "agent_token_id": agent["token_id"]}
+        if payload.action:
+            # Re-derive what is runnable from this agent's own stored capabilities.
+            # `pause` and `liquidationCall` are live tool names on these very
+            # endpoints; a name from a browser must never reach tools/call
+            # because the browser said so.
+            allowed = {a["name"] for a in agent_client.runnable_actions(
+                agent.get("capabilities") or [], payload.wallet_address)}
+            if payload.action not in allowed:
+                raise HTTPException(422, f"'{payload.action}' is not an action AgentDock can run for this agent")
+            extra["agent_action"] = payload.action
     else:
         raise HTTPException(404, "No such agent. Hire an onchain agent (bsc-...) or a b402 service.")
     task = {"id": task_id, "agent_id": agent_id, "agent_name": agent_name, "objective": payload.objective, "constraints": payload.constraints, "wallet_address": payload.wallet_address, "state": "created", "estimated_price_usd": price, "payment_terms": None, "settlement": None, "result_preview": None, "quote_id": None, "quote_expires_at": None, "tx_hash": None, "result": None, "created_at": stamp, "updated_at": stamp, **extra}
@@ -659,7 +690,8 @@ async def _run_onchain_agent(task: dict) -> dict:
             task.get("agent_token_id"),
             # The connected wallet, so read-only tools can answer about the
             # user's own position instead of the protocol in the abstract.
-            task.get("wallet_address"))
+            task.get("wallet_address"),
+            task.get("agent_action"))
     except agent_client.AgentPaymentRequired:
         # A paying onchain agent (e.g. an x402 A2A endpoint). Its settlement may
         # be off-BNB-Chain, so it is surfaced honestly rather than half-charged.

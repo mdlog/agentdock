@@ -251,13 +251,34 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
             await asyncio.sleep(0.34)
 
         gate = asyncio.Semaphore(8)
+        # One host can back hundreds of registrations — 180 agents shared a single
+        # card URL here. Probing them independently and concurrently made the host
+        # rate-limit us, and those 429s were then recorded as facts about the
+        # agents. Two caches prevent that: a URL that resolves identically for two
+        # agents is probed once, and no host is asked more than one question at a
+        # time. Templated URLs resolve per-agent, so they are NOT deduplicated —
+        # each agent's own id may produce a different verdict.
+        verdict_cache: dict[str, tuple[str, str]] = {}
+        host_locks: dict[str, asyncio.Lock] = {}
 
         async def verify(agent: dict, ep: tuple[str, str] | None) -> tuple[dict, dict]:
             if not ep:
                 return agent, {"endpoint_status": "none", "endpoint_note": "No endpoint published onchain", "activatable": False}
-            async with gate:
-                status, note = await agent_client.probe_endpoint(*ep)
-            return agent, {"endpoint_kind": ep[0], "agent_endpoint": ep[1], "endpoint_status": status,
+            kind, url = ep
+            token_id = agent["token_id"]
+            resolved = agent_client.substitute_agent_id(url, token_id)
+            cache_key = f"{kind}|{resolved}"
+            cached = verdict_cache.get(cache_key)
+            if cached:
+                status, note = cached
+            else:
+                host = urlparse(resolved).hostname or resolved
+                async with gate:
+                    async with host_locks.setdefault(host, asyncio.Lock()):
+                        status, note = await agent_client.probe_endpoint(kind, url, token_id)
+                        await asyncio.sleep(0.25)
+                verdict_cache[cache_key] = (status, note)
+            return agent, {"endpoint_kind": kind, "agent_endpoint": url, "endpoint_status": status,
                            "endpoint_note": note[:300], "activatable": status == "live"}
 
         for completed in asyncio.as_completed([verify(a, e) for a, e in resolved]):
@@ -589,7 +610,12 @@ async def run_task(task_id: str):
 async def _run_onchain_agent(task: dict) -> dict:
     task_id = task["id"]
     try:
-        result = await agent_client.call_agent(task["endpoint_kind"], task["agent_endpoint"], task["objective"])
+        result = await agent_client.call_agent(
+            task["endpoint_kind"], task["agent_endpoint"], task["objective"],
+            task.get("agent_token_id"),
+            # The connected wallet, so read-only tools can answer about the
+            # user's own position instead of the protocol in the abstract.
+            task.get("wallet_address"))
     except agent_client.AgentPaymentRequired:
         # A paying onchain agent (e.g. an x402 A2A endpoint). Its settlement may
         # be off-BNB-Chain, so it is surfaced honestly rather than half-charged.

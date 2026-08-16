@@ -189,11 +189,33 @@ _MUTATION_WORDS = ("build", "swap", "borrow", "repay", "mint", "redeem", "deposi
                    "pay", "bridge", "delete", "update", "set_")
 
 
-def _safe_readonly_call(tool: dict[str, Any]) -> dict[str, Any] | None:
+_CHAIN_NAMES = ("bsc", "bnb", "bnbchain", "bnb chain", "binance")
+_ADDRESS_ARGS = ("useraddress", "user_address", "walletaddress", "wallet_address",
+                 "address", "account", "wallet", "owner", "user")
+
+
+def _fill_argument(arg: str, prop: dict[str, Any], wallet: str | None):
+    """One required argument, filled without guessing, or None.
+
+    Three fillable shapes: an argument named like a user address takes the
+    wallet the task already carries (public information the user gave us); an
+    enum naming this chain takes that value; anything else is unknowable and
+    disqualifies the tool.
+    """
+    low = arg.lower().replace("-", "_")
+    if wallet and any(low == a or low.endswith(a) for a in _ADDRESS_ARGS):
+        return wallet
+    enum = prop.get("enum") or (prop.get("items") or {}).get("enum") or []
+    match = next((v for v in enum if str(v).lower() in _CHAIN_NAMES), None)
+    if match is not None:
+        return [match] if prop.get("type") == "array" else match
+    return None
+
+
+def _safe_readonly_call(tool: dict[str, Any], wallet: str | None = None) -> dict[str, Any] | None:
     """Return arguments for a tool that is safe to call without being asked, or
-    None. Safe means: read-only by name, and either no required arguments at
-    all, or a single required array whose enum names this chain — the one value
-    we can fill without guessing.
+    None. Safe means: read-only by name, no mutation words, and every required
+    argument fillable without inventing anything (see _fill_argument).
     """
     raw = str(tool.get("name") or "")
     name = raw.lower().lstrip("_")
@@ -203,17 +225,14 @@ def _safe_readonly_call(tool: dict[str, Any]) -> dict[str, Any] | None:
     if not (name.startswith(_READONLY_PREFIXES) or stripped.startswith(_READONLY_PREFIXES)):
         return None
     schema = tool.get("inputSchema") or {}
-    required = schema.get("required") or []
-    if not required:
-        return {}
-    if len(required) == 1:
-        prop = (schema.get("properties") or {}).get(required[0]) or {}
-        if prop.get("type") == "array":
-            enum = (prop.get("items") or {}).get("enum") or []
-            match = next((v for v in enum if str(v).lower() in ("bsc", "bnb", "bnbchain", "bnb chain", "binance")), None)
-            if match:
-                return {required[0]: [match]}
-    return None
+    properties = schema.get("properties") or {}
+    args: dict[str, Any] = {}
+    for arg in schema.get("required") or []:
+        value = _fill_argument(arg, properties.get(arg) or {}, wallet)
+        if value is None:
+            return None
+        args[arg] = value
+    return args
 
 
 def _is_agent_card(url: str) -> bool:
@@ -276,7 +295,7 @@ async def _post(client: httpx.AsyncClient, url: str, payload: dict, session: str
     return response
 
 
-async def call_mcp(url: str, objective: str) -> dict[str, Any]:
+async def call_mcp(url: str, objective: str, wallet: str | None = None) -> dict[str, Any]:
     """initialize -> tools/list -> call a chat-like tool if present, else report tools."""
     await _assert_public_https(url)
     async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
@@ -310,10 +329,12 @@ async def call_mcp(url: str, objective: str) -> dict[str, Any]:
         # no argument we would have to invent. Their live output is a far
         # better answer than a menu, and it is what the agent actually does.
         outputs = []
-        for tool in tools:
-            args = _safe_readonly_call(tool)
-            if args is None:
-                continue
+        # With a wallet in hand, the personalised tools are the interesting
+        # ones: "your health factor" beats "the protocol description".
+        candidates = [(tool, _safe_readonly_call(tool, wallet)) for tool in tools]
+        candidates = [(tool, args) for tool, args in candidates if args is not None]
+        candidates.sort(key=lambda pair: 0 if wallet and wallet in pair[1].values() else 1)
+        for tool, args in candidates:
             try:
                 called = await _post(client, url, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                     "params": {"name": tool["name"], "arguments": args}}, session)
@@ -456,7 +477,7 @@ async def _probe(kind: str, url: str, token_id: int | None = None) -> tuple[str,
         return "dead", f"{type(exc).__name__}: {exc}"
 
 
-async def call_agent(kind: str, url: str, objective: str, token_id: int | None = None) -> dict[str, Any]:
+async def call_agent(kind: str, url: str, objective: str, token_id: int | None = None, wallet: str | None = None) -> dict[str, Any]:
     if kind == "mcp":
-        return await call_mcp(substitute_agent_id(url, token_id), objective)
+        return await call_mcp(substitute_agent_id(url, token_id), objective, wallet)
     return await call_a2a(url, objective, token_id)

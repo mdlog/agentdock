@@ -566,3 +566,37 @@ async def test_mcp_falls_back_to_the_listing_when_nothing_is_safe(monkeypatch, p
 
     assert "borrow" in result["output"]
     assert "live tools" in result["output"]
+
+
+# --- the connected wallet may answer for its own public positions ------------
+
+def test_address_argument_is_filled_from_the_task_wallet():
+    tool = {"name": "getUserHealthIndicators", "inputSchema": {
+        "required": ["chainNames", "userAddress"],
+        "properties": {"chainNames": {"type": "array", "items": {"enum": ["ethereum", "bnbchain"]}},
+                        "userAddress": {"type": "string"}}}}
+
+    args = agent_client._safe_readonly_call(tool, wallet="0x" + "a" * 40)
+
+    assert args == {"chainNames": ["bnbchain"], "userAddress": "0x" + "a" * 40}
+
+
+def test_address_tools_are_skipped_when_no_wallet_is_connected():
+    tool = {"name": "getUserHealthIndicators", "inputSchema": {
+        "required": ["userAddress"], "properties": {"userAddress": {"type": "string"}}}}
+
+    assert agent_client._safe_readonly_call(tool, wallet=None) is None
+
+
+def test_string_chain_enum_is_filled_without_an_array():
+    tool = {"name": "getReserveOverview", "inputSchema": {
+        "required": ["chainName"], "properties": {"chainName": {"type": "string", "enum": ["ethereum", "bsc"]}}}}
+
+    assert agent_client._safe_readonly_call(tool) == {"chainName": "bsc"}
+
+
+def test_wallet_never_leaks_into_a_mutating_tool():
+    tool = {"name": "withdrawAll", "inputSchema": {
+        "required": ["userAddress"], "properties": {"userAddress": {"type": "string"}}}}
+
+    assert agent_client._safe_readonly_call(tool, wallet="0x" + "a" * 40) is None

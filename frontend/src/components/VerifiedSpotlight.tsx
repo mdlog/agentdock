@@ -58,6 +58,7 @@ export const VerifiedSpotlight = ({ intervalMs = 9000 }: { intervalMs?: number }
           <AgentAvatar
             name={`${agent.chain_id}-${agent.token_id}-${agent.name}`}
             testId={`spotlight-avatar-${agent.token_id}`}
+            size={46}
             src={agent.has_source_icon ? `${backend}/api/onchain/agents/mainnet/${agent.token_id}/icon` : undefined}
           />
           <div>

@@ -377,6 +377,29 @@ async def trigger_enrich(network: str = "mainnet"):
     return {"status": "started", "chain_id": chain_id}
 
 
+@api.get("/marketplace/verified", tags=["agents"])
+async def marketplace_verified(network: str = "mainnet", limit: int = Query(default=8, ge=1, le=20)):
+    """The agents whose endpoints answered, for the hero to spotlight.
+
+    Deliberately not "recently registered": 265 agents registered today, none
+    of them proven callable, and most named things like "cccccccccc". A feed of
+    those would make the registry look busy while showing nothing usable, which
+    is the impression this product exists to correct. These are the few that
+    work, which is the hardest thing to find in a 257,000-row catalogue.
+    """
+    chain_id = 97 if network == "testnet" else 56
+    items = await db.scan_agents.find(
+        {"chain_id": chain_id, "activatable": True},
+        {"_id": 0, "id": 1, "token_id": 1, "name": 1, "description": 1, "endpoint_kind": 1,
+         "categories": 1, "capabilities": 1, "total_score": 1, "rank": 1, "has_source_icon": 1, "chain_id": 1},
+    ).sort("total_score", -1).to_list(limit)
+    return {"items": [{**a, "tool_count": len(a.pop("capabilities", []) or [])} for a in items],
+            "total_live": await db.scan_agents.count_documents({"chain_id": chain_id, "activatable": True}),
+            # Shown beside the live count, because the ratio is the point: the
+            # scarcity is what makes finding these worth a marketplace.
+            "catalogue_total": await db.scan_agents.count_documents({"chain_id": chain_id})}
+
+
 @api.get("/marketplace/pulse", tags=["agents"])
 async def marketplace_pulse(network: str = "mainnet"):
     """What the marketplace has done lately, in numbers that move on their own.

@@ -8,6 +8,7 @@ import { B402ResourceCard } from "@/components/B402ResourceCard";
 import { CategoryBrowse } from "@/components/CategoryBrowse";
 import { RotatingWord } from "@/components/RotatingWord";
 import { LivePulse } from "@/components/LivePulse";
+import { VerifiedSpotlight } from "@/components/VerifiedSpotlight";
 import { Pagination } from "@/components/Pagination";
 import { useCompare } from "@/hooks/useCompare";
 import { Button } from "@/components/ui/button";
@@ -87,12 +88,15 @@ export default function MarketplacePage() {
 
   return <div>
     <section className="search-stage">
+      <div className="stage-main">
       <div className="stage-copy"><span className="eyebrow"><Sparkles size={14} /> Agent marketplace on BNB Chain</span><h1 data-testid="marketplace-heading">Find the right agent on BNB Chain for{" "}
         {themes.length > 1
           ? <RotatingWord words={themes.map(theme => theme.label)} />
           : <span>DeFi</span>}</h1><p data-testid="marketplace-subheading">Every categorised agent in the registry has been called to see whether it answers. Pick a job, compare the evidence, and activate the one that fits.</p></div>
       <div className="search-box"><Search size={21} /><Input data-testid="marketplace-search-input" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search agents by name or what they do" /><kbd>⌘ K</kbd></div>
       <LivePulse />
+      </div>
+      <VerifiedSpotlight />
     </section>
 
     <CategoryBrowse

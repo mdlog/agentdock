@@ -944,20 +944,73 @@ def test_assess_answer_grades_payloads_not_prose():
     assess_answer('{"error": null, "data": {"apy": 3.28}}')
 
 
+SKILL_REFUSAL = _response({"jsonrpc": "2.0", "id": 1, "result": {
+    "contextId": "ctx-1", "kind": "message", "messageId": "m-1", "role": "agent",
+    "parts": [{"kind": "data", "data": {
+        "error": "unknown skill: None", "skills": ["negotiate", "notify_funded"],
+        "hint": "send the skill envelope as an A2A data part"}}]}})
+
+
 @pytest.mark.anyio
 async def test_an_error_in_a_data_part_fails_the_task(monkeypatch, public_host):
-    """Agent #265375 answers with DataParts, not text: its error travelled as
-    parts[0].data.error inside envelope boilerplate and was recorded completed."""
+    """A data-part error from an agent whose skills we cannot speak fails the
+    task with the agent's own words — it was previously recorded completed."""
     _install(monkeypatch, [
         _response({"jsonrpc": "2.0", "id": 1, "result": {
             "contextId": "ctx-1", "kind": "message", "messageId": "m-1", "role": "agent",
             "parts": [{"kind": "data", "data": {
-                "error": "unknown skill: None", "skills": ["negotiate", "notify_funded"],
-                "hint": "send the skill envelope as an A2A data part"}}]}}),
+                "error": "unsupported input", "skills": ["render_chart"]}}]}}),
     ])
 
-    with pytest.raises(agent_client.AgentRejected, match="unknown skill"):
+    with pytest.raises(agent_client.AgentRejected, match="unsupported input"):
         await agent_client.call_a2a("https://agent.example/rpc", "report my position status")
+
+
+@pytest.mark.anyio
+async def test_a_skill_refusal_naming_negotiate_becomes_a_quote(monkeypatch, public_host):
+    """Agent #265375 rejects plain text but names its skills. negotiate is the
+    read-only one, so the call retries in the agent's own dialect and the
+    accepted quote surfaces as payment required — a price, not a failure."""
+    client = _install(monkeypatch, [
+        SKILL_REFUSAL,
+        _response({"jsonrpc": "2.0", "id": 1, "result": {
+            "kind": "message", "role": "agent",
+            "parts": [{"kind": "data", "data": {
+                "response": {"accepted": True,
+                             "terms": {"price": "100000000000000000",
+                                       "currency": "0xcE24439F2D9C6a2289F741120FE202248B666666"},
+                             "estimated_completion_seconds": 600},
+                "verifying_contract": "0xEa4DAa3100A767e86FDed867729ae7446476EBA6"}}]}}),
+    ])
+
+    with pytest.raises(agent_client.AgentPaymentRequired) as excinfo:
+        await agent_client.call_a2a("https://agent.example/rpc", "Report the position status")
+
+    # The quote is priced in human units from the on-chain-verified allowlist.
+    assert "0.1 U" in str(excinfo.value)
+    assert "ERC-8183" in str(excinfo.value)
+    # The retry spoke the agent's dialect: a data part carrying negotiate,
+    # built from the visitor's own objective.
+    second = client.sent[-1]["body"]["params"]["message"]["parts"][0]
+    assert second["kind"] == "data"
+    assert second["data"]["skill"] == "negotiate"
+    assert second["data"]["task_description"] == "Report the position status"
+    # The money-moving skill is never sent.
+    assert "notify_funded" not in json.dumps(client.sent)
+
+
+@pytest.mark.anyio
+async def test_a_declined_negotiate_quote_fails_with_the_agents_reason(monkeypatch, public_host):
+    _install(monkeypatch, [
+        SKILL_REFUSAL,
+        _response({"jsonrpc": "2.0", "id": 1, "result": {
+            "kind": "message", "role": "agent",
+            "parts": [{"kind": "data", "data": {
+                "response": {"accepted": False, "reason": "position not managed by this agent"}}}]}}),
+    ])
+
+    with pytest.raises(agent_client.AgentRejected, match="position not managed"):
+        await agent_client.call_a2a("https://agent.example/rpc", "Report the position status")
 
 
 @pytest.mark.anyio

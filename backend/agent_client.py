@@ -487,38 +487,107 @@ def _a2a_data(result: dict[str, Any]) -> list[dict]:
     return found
 
 
+def _negotiate_envelope(objective: str) -> dict:
+    """An ERC-8183 negotiate request built from the visitor's objective.
+
+    The shape was learned from the agent's own validation errors, one missing
+    field at a time: task_description at the top, deliverables and
+    quality_standards inside terms. negotiate is a quote request and commits
+    nothing — the skill that moves money, notify_funded, is never sent.
+    """
+    return {"skill": "negotiate",
+            "task_description": objective,
+            "terms": {"deliverables": [objective[:200]],
+                      "quality_standards": ["accurate, current data"]}}
+
+
+def _fmt_quote_amount(price: Any, currency: Any) -> str:
+    """A quoted price in human units when the token is on our allowlist."""
+    from b402 import BSC_SETTLEMENT_ASSETS  # local import: b402 must stay importable without this module
+    known = BSC_SETTLEMENT_ASSETS.get(str(currency or "").strip().lower())
+    try:
+        base = int(str(price))
+    except (TypeError, ValueError):
+        return f"{price} of {currency}"
+    if not known:
+        return f"{base} base units of {currency}"
+    amount = base / (10 ** known["decimals"])
+    return f"{amount:g} {known['symbol']}"
+
+
+def _erc8183_quote(data_parts: list[dict]) -> str | None:
+    """A human sentence for an accepted negotiate quote, or None."""
+    for data in data_parts:
+        response = data.get("response")
+        if not isinstance(response, dict) or "accepted" not in response:
+            continue
+        if not response.get("accepted"):
+            reason = str(response.get("reason") or "no reason given")
+            raise AgentRejected(f"The agent declined to quote the job: {reason}", reason="upstream_error")
+        terms = response.get("terms") or {}
+        quoted = _fmt_quote_amount(terms.get("price"), terms.get("currency"))
+        eta = response.get("estimated_completion_seconds")
+        suffix = f", estimated completion {int(eta)}s" if isinstance(eta, (int, float)) else ""
+        return (f"This agent quoted {quoted} through ERC-8183 escrow"
+                f" (verifying contract {str(data.get('verifying_contract') or 'unstated')[:12]}…{suffix})."
+                " AgentDock does not settle ERC-8183 escrow yet.")
+    return None
+
+
+def _first_data_error(data_parts: list[dict]) -> tuple[str | None, list]:
+    """The first error a data part carries, plus any skill list beside it."""
+    for data in data_parts:
+        for key in data:
+            if key.lower() in _ERROR_KEYS and data[key]:
+                detail = data[key]
+                detail = json.dumps(detail) if isinstance(detail, (dict, list)) else str(detail)
+                skills = data.get("skills")
+                return detail, skills if isinstance(skills, list) else []
+    return None, []
+
+
 async def call_a2a(url: str, objective: str, token_id: int | None = None) -> dict[str, Any]:
     await _assert_public_https(substitute_agent_id(url, token_id))
     async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
         target = await resolve_a2a_endpoint(client, url, token_id)
-        response = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
-            "message": {"role": "user", "parts": [{"kind": "text", "text": objective}], "messageId": "agentdock-1"}}})
-        result = _unwrap(_sse_or_json(response.text), "message/send", tolerate_bare=True)
-        text = _a2a_text(result)
-        # A Task can complete the JSON-RPC call successfully while reporting that
-        # the work itself did not succeed.
-        state = ((result.get("status") or {}) if isinstance(result.get("status"), dict) else {}).get("state")
-        if state in ("failed", "rejected", "canceled", "cancelled"):
-            raise AgentRejected(f"The agent ended the task as {state}: {text or 'no reason given'}", reason="upstream_error")
-        if not text:
-            data_parts = _a2a_data(result)
-            for data in data_parts:
-                # An error inside a data part is the agent's actual answer.
-                for key in data:
-                    if key.lower() in _ERROR_KEYS and data[key]:
-                        detail = data[key]
-                        detail = json.dumps(detail) if isinstance(detail, (dict, list)) else str(detail)
-                        raise AgentRejected(
-                            f"The agent reported an error instead of an answer: {detail[:200]}",
-                            reason="upstream_error")
-            if data_parts:
-                # The payloads alone, without the envelope boilerplate that
-                # would drown them.
-                text = json.dumps(data_parts[0] if len(data_parts) == 1 else data_parts)[:2000]
-        if not text:
-            text = json.dumps(result)[:2000]
-        assess_answer(text)
-        return {"transport": "a2a", "output": text[:4000]}
+        parts: list[dict] = [{"kind": "text", "text": objective}]
+        for attempt in ("text", "skill"):
+            response = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
+                "message": {"role": "user", "parts": parts, "messageId": f"agentdock-{attempt}"}}})
+            result = _unwrap(_sse_or_json(response.text), "message/send", tolerate_bare=True)
+            text = _a2a_text(result)
+            # A Task can complete the JSON-RPC call successfully while reporting
+            # that the work itself did not succeed.
+            state = ((result.get("status") or {}) if isinstance(result.get("status"), dict) else {}).get("state")
+            if state in ("failed", "rejected", "canceled", "cancelled"):
+                raise AgentRejected(f"The agent ended the task as {state}: {text or 'no reason given'}", reason="upstream_error")
+            if not text:
+                data_parts = _a2a_data(result)
+                quote = _erc8183_quote(data_parts)
+                if quote:
+                    # A quote is a price, not a failure — the task should read
+                    # payment_pending, exactly like an x402 challenge.
+                    raise AgentPaymentRequired(quote)
+                error, skills = _first_data_error(data_parts)
+                if error is not None:
+                    if attempt == "text" and "negotiate" in skills:
+                        # The agent rejected plain text but named the skills it
+                        # speaks. negotiate is the read-only one — ask it for a
+                        # quote in its own dialect, once.
+                        parts = [{"kind": "data", "data": _negotiate_envelope(objective)}]
+                        continue
+                    raise AgentRejected(
+                        f"The agent reported an error instead of an answer: {error[:200]}",
+                        reason="upstream_error")
+                if data_parts:
+                    # The payloads alone, without the envelope boilerplate that
+                    # would drown them.
+                    text = json.dumps(data_parts[0] if len(data_parts) == 1 else data_parts)[:2000]
+            if not text:
+                text = json.dumps(result)[:2000]
+            assess_answer(text)
+            return {"transport": "a2a", "output": text[:4000]}
+        raise AgentRejected("The agent rejected both plain text and its own skill envelope.", reason="upstream_error")
 
 
 async def probe_endpoint(kind: str, url: str, token_id: int | None = None) -> tuple[str, str, str]:

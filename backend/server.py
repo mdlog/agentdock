@@ -905,12 +905,17 @@ async def _run_onchain_agent(task: dict) -> dict:
             # user's own position instead of the protocol in the abstract.
             task.get("wallet_address"),
             task.get("agent_action"))
-    except agent_client.AgentPaymentRequired:
-        # A paying onchain agent (e.g. an x402 A2A endpoint). Its settlement may
-        # be off-BNB-Chain, so it is surfaced honestly rather than half-charged.
-        await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "updated_at": now_iso()}})
-        await audit(task_id, "payment.required", "This agent requires payment through its own x402 endpoint; direct settlement is not yet wired.")
-        raise HTTPException(409, "This agent charges through its own x402 endpoint, which AgentDock does not settle yet.")
+    except agent_client.AgentPaymentRequired as exc:
+        # A paying onchain agent — an x402 endpoint, or an ERC-8183 negotiator
+        # that answered with a signed quote. A price is not a failure, and the
+        # quote's own words (amount, token, escrow contract) beat a generic
+        # sentence, so the exception text is what the visitor reads.
+        detail = str(exc) if str(exc) != "Agent requires payment" else \
+            "This agent charges through its own x402 endpoint, which AgentDock does not settle yet."
+        await db.tasks.update_one({"id": task_id}, {"$set": {
+            "state": "payment_pending", "result_preview": detail, "updated_at": now_iso()}})
+        await audit(task_id, "payment.required", detail)
+        raise HTTPException(409, detail)
     except agent_client.AgentRejected as exc:
         # The agent is reachable and simply refused. Saying "completed" here and
         # showing its error text as the result is how a failure gets dressed up

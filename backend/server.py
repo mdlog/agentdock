@@ -974,7 +974,10 @@ async def _run_b402(task_id: str, task: dict) -> dict:
     except b402.B402Error as exc:
         raise HTTPException(UPSTREAM_FAILED, str(exc)) from exc
 
-    await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "payment_terms": terms, "b402_accept": accept, "b402_method": method, "estimated_price_usd": terms["amount_tokens"], "updated_at": now_iso()}})
+    # Recorded with the terms, because the signature is replayed minutes later
+    # in a separate request: the header name and the payload's declared version
+    # both follow the quote the user actually signed, not a default.
+    await db.tasks.update_one({"id": task_id}, {"$set": {"state": "payment_pending", "payment_terms": terms, "b402_accept": accept, "b402_method": method, "b402_x402_version": b402.challenge_version(challenge, accept), "estimated_price_usd": terms["amount_tokens"], "updated_at": now_iso()}})
     await audit(task_id, "payment.quoted", f"Agent requires {terms['amount_tokens']:g} {terms['asset_name']} on BNB Chain. Nothing is signed until you approve it in your wallet.")
     return {"state": "payment_pending", "paid": True, "terms": terms}
 
@@ -1019,9 +1022,13 @@ async def pay_task(task_id: str, payload: PayRequest):
         raise HTTPException(409, f"Task is {task['state']}, not awaiting payment")
     await audit(task_id, "payment.submitted", "Signed payment authorization submitted to the agent.")
 
-    header = b402.build_payment_header(accept, payload.signature, authorization)
+    # Tasks quoted before the version was recorded fall back to 2, which is what
+    # every b402 merchant on BNB Chain speaks.
+    x402_version = b402.challenge_version({"x402Version": task.get("b402_x402_version")}, accept)
+    header = b402.build_payment_header(accept, payload.signature, authorization, x402_version)
     try:
-        response = await b402.call_paid(resource["resource"], header, method=task.get("b402_method", "GET"), params=_call_params(task, resource))
+        response = await b402.call_paid(resource["resource"], header, method=task.get("b402_method", "GET"),
+                                        params=_call_params(task, resource), x402_version=x402_version)
     except b402.PaymentNotSent as exc:
         # The authorization was never presented, so it is still unspent. Returning
         # the task to payment_pending is what makes the attempt retryable instead

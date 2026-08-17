@@ -9,6 +9,7 @@ the user something about their money that is not true.
 
 import base64
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -194,3 +195,206 @@ def test_a_known_asset_is_preferred_over_an_unverifiable_one():
     ]}
 
     assert b402.select_bsc_eip3009(challenge)["asset"] == USD1
+
+
+# --- the signature has to travel under the name the merchant reads -----------
+#
+# x402 v2 dropped the non-standard X- prefix: X-PAYMENT became
+# PAYMENT-SIGNATURE. This module already read the v2 names on the way in
+# (payment-required, payment-response) while sending the v1 name on the way
+# out, and no real settlement had ever run to catch it.
+
+
+def _recording_client(statuses):
+    """A client that answers with `statuses` in order and records every call."""
+    sent: list[dict] = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def request(self, method, url, headers=None, **_kw):
+            sent.append({"method": method, "url": url, "headers": headers or {}})
+            status = statuses[min(len(sent) - 1, len(statuses) - 1)]
+            return httpx.Response(status, content=b"{}", request=httpx.Request(method, url))
+
+    return sent, (lambda **_kw: _Client())
+
+
+@pytest.mark.anyio
+async def test_a_v2_merchant_is_paid_under_the_v2_header(monkeypatch, public_host):
+    sent, client = _recording_client([200])
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    await b402.call_paid("https://merchant.example/x", "hdr", x402_version=2)
+
+    assert sent[0]["headers"].get("PAYMENT-SIGNATURE") == "hdr"
+    assert "X-PAYMENT" not in sent[0]["headers"]
+
+
+@pytest.mark.anyio
+async def test_a_v1_merchant_is_paid_under_the_legacy_header(monkeypatch, public_host):
+    sent, client = _recording_client([200])
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    await b402.call_paid("https://merchant.example/x", "hdr", x402_version=1)
+
+    assert sent[0]["headers"].get("X-PAYMENT") == "hdr"
+    assert "PAYMENT-SIGNATURE" not in sent[0]["headers"]
+
+
+@pytest.mark.anyio
+async def test_a_merchant_that_still_reads_the_old_name_is_retried_once(monkeypatch, public_host):
+    """Deployed middleware mixes the two vocabularies — one live merchant
+    advertises PAYMENT-REQUIRED and X-PAYMENT-RESPONSE in the same CORS header.
+    A 402 says the payment was not taken, and the same authorization cannot
+    settle twice regardless, because EIP-3009 spends its nonce on first use."""
+    sent, client = _recording_client([402, 200])
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    response = await b402.call_paid("https://merchant.example/x", "hdr", x402_version=2)
+
+    assert [h for call in sent for h in ("PAYMENT-SIGNATURE", "X-PAYMENT") if h in call["headers"]] \
+        == ["PAYMENT-SIGNATURE", "X-PAYMENT"]
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_an_accepted_payment_is_never_presented_a_second_time(monkeypatch, public_host):
+    sent, client = _recording_client([200])
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    await b402.call_paid("https://merchant.example/x", "hdr")
+
+    assert len(sent) == 1
+
+
+@pytest.mark.anyio
+async def test_a_merchant_that_refuses_under_both_names_is_answered_with_its_402(monkeypatch, public_host):
+    """Two 402s are a refusal, not a transport failure: the caller has to see
+    the merchant's own status rather than a retry loop swallowing it."""
+    sent, client = _recording_client([402, 402])
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    response = await b402.call_paid("https://merchant.example/x", "hdr")
+
+    assert len(sent) == 2
+    assert response.status_code == 402
+
+
+def test_the_payload_declares_the_version_the_merchant_quoted():
+    """A v1 merchant reading `x402Version: 2` in the payload it was handed is
+    the same mismatch as the header name, one layer down."""
+    payload = json.loads(base64.b64decode(
+        b402.build_payment_header(_accept(), "0x" + "11" * 65, {"from": "0x" + "1" * 40}, x402_version=1)))
+
+    assert payload["x402Version"] == 1
+
+
+def test_the_payload_declares_v2_by_default():
+    payload = json.loads(base64.b64decode(
+        b402.build_payment_header(_accept(), "0x" + "11" * 65, {"from": "0x" + "1" * 40})))
+
+    assert payload["x402Version"] == 2
+
+
+def test_the_version_is_read_from_the_option_being_paid():
+    """Merchants repeat it per accept; one lists v2 options next to v1 ones."""
+    accept = {**_accept(), "x402Version": 1}
+
+    assert b402.challenge_version({"x402Version": 2, "accepts": [accept]}, accept) == 1
+
+
+def test_the_version_falls_back_to_the_challenge_then_to_v2():
+    assert b402.challenge_version({"x402Version": 1, "accepts": []}, _accept()) == 1
+    assert b402.challenge_version({"accepts": []}, _accept()) == 2
+
+
+# --- and the version has to survive the trip from quote to signature ---------
+#
+# The quote and the payment are two requests minutes apart, with a wallet
+# signature in between. A version read at quote time and dropped before the
+# replay would leave the header name to a default rather than to the merchant.
+
+
+class _Collection:
+    def __init__(self, docs=None):
+        self.docs = [dict(d) for d in (docs or [])]
+
+    @staticmethod
+    def _matches(doc, query):
+        return all(doc.get(key) == value for key, value in query.items())
+
+    async def find_one(self, query, *_a, **_kw):
+        return next((dict(d) for d in self.docs if self._matches(d, query)), None)
+
+    async def update_one(self, query, update, *_a, **_kw):
+        matched = [d for d in self.docs if self._matches(d, query)]
+        for doc in matched:
+            doc.update(update.get("$set", {}))
+        return SimpleNamespace(modified_count=len(matched))
+
+    async def insert_one(self, doc, *_a, **_kw):
+        self.docs.append(dict(doc))
+        return SimpleNamespace(inserted_id=doc.get("id"))
+
+
+class _Db:
+    def __init__(self, task, resource):
+        self.tasks = _Collection([task])
+        self.b402_resources = _Collection([resource])
+        self.audit_events = _Collection()
+
+
+RESOURCE = {"id": "b402-test", "resource": "https://merchant.example/x"}
+
+
+def _task(**over):
+    task = {"id": "task-1", "agent_id": RESOURCE["id"], "state": "payment_pending",
+            "objective": "list the pools", "b402_method": "GET",
+            "b402_accept": _accept(), "b402_authorization": {"from": "0x" + "1" * 40}}
+    task.update(over)
+    return task
+
+
+@pytest.mark.anyio
+async def test_the_version_the_merchant_quoted_is_the_version_it_is_paid_in(monkeypatch):
+    """A v1 merchant must not be replayed in v2's dialect. Both the header name
+    and the payload's own x402Version follow the quote that was signed."""
+    import server
+    from models import PayRequest
+
+    presented: dict = {}
+
+    async def _record(url, header, method="GET", params=None, x402_version=2):
+        presented.update(header=header, x402_version=x402_version)
+        return httpx.Response(200, content=b"{}", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(server, "db", _Db(_task(b402_x402_version=1), RESOURCE))
+    monkeypatch.setattr(server.b402, "call_paid", _record)
+
+    await server.pay_task("task-1", PayRequest(signature="0x" + "ab" * 65))
+
+    assert presented["x402_version"] == 1
+    assert json.loads(base64.b64decode(presented["header"]))["x402Version"] == 1
+
+
+@pytest.mark.anyio
+async def test_the_quote_records_which_version_the_merchant_speaks(monkeypatch):
+    import server
+
+    challenge = {"x402Version": 1, "accepts": [_accept()]}
+
+    async def _challenge(url, params=None):
+        return challenge, httpx.Response(402, content=b"{}", request=httpx.Request("GET", url)), "GET"
+
+    db = _Db(_task(state="created"), RESOURCE)
+    monkeypatch.setattr(server, "db", db)
+    monkeypatch.setattr(server.b402, "fetch_challenge", _challenge)
+
+    await server._run_b402("task-1", _task(state="created"))
+
+    assert db.tasks.docs[0]["b402_x402_version"] == 1

@@ -42,6 +42,14 @@ DEFAULT_VALIDITY_SECONDS = 60
 
 USER_AGENT = "AgentDock/1.0 (+https://github.com/mdlog/agentdock)"
 
+# x402 v2 dropped the non-standard X- prefix: X-PAYMENT became PAYMENT-SIGNATURE
+# and X-PAYMENT-RESPONSE became PAYMENT-RESPONSE — the two names this module
+# already reads on the way in. Presenting a signature under the v1 name to a v2
+# merchant is a header nobody looks at, and no settlement has run for real yet
+# that would have caught it.
+PAYMENT_HEADER_V2 = "PAYMENT-SIGNATURE"
+PAYMENT_HEADER_V1 = "X-PAYMENT"
+
 # Settlement assets AgentDock will present for signing, with the decimals read
 # from each contract on BNB Chain — not from the merchant.
 #
@@ -211,9 +219,39 @@ def build_typed_data(accept: dict[str, Any], payer: str, valid_after: int, valid
     }
 
 
-def build_payment_header(accept: dict[str, Any], signature: str, authorization: dict[str, Any]) -> str:
+def challenge_version(challenge: dict[str, Any], accept: dict[str, Any]) -> int:
+    """Which x402 version this quote speaks.
+
+    Merchants repeat the figure inside each option, and the option being paid is
+    the one whose word counts; the top-level figure is the fallback. Every b402
+    merchant on BNB Chain answers v2, so a challenge that states nothing is read
+    as v2 rather than as the older dialect.
+    """
+    for source in (accept, challenge):
+        try:
+            return int(source.get("x402Version"))
+        except (TypeError, ValueError):
+            continue
+    return 2
+
+
+def _header_names(x402_version: int) -> list[str]:
+    """The name to present the signature under, then the one to fall back to.
+
+    Deployed middleware mixes the two vocabularies — one live merchant answers
+    with a v2 `payment-required` challenge while advertising `X-PAYMENT-RESPONSE`
+    in its own CORS headers. A 402 says the merchant did not take the payment, so
+    the other name is worth exactly one retry; and the same authorization cannot
+    settle twice either way, because EIP-3009 spends its nonce on first use.
+    """
+    ordered = [PAYMENT_HEADER_V2, PAYMENT_HEADER_V1]
+    return ordered if x402_version >= 2 else ordered[::-1]
+
+
+def build_payment_header(accept: dict[str, Any], signature: str, authorization: dict[str, Any],
+                         x402_version: int = 2) -> str:
     payload = {
-        "x402Version": 2,
+        "x402Version": x402_version,
         "scheme": accept.get("scheme") or "exact",
         "network": accept.get("network"),
         "payload": {"signature": signature, "authorization": authorization},
@@ -262,8 +300,13 @@ async def fetch_challenge(url: str, params: dict | None = None) -> tuple[dict[st
     return _decode_challenge(response), response, method
 
 
-async def call_paid(url: str, header: str, method: str = "GET", params: dict | None = None) -> httpx.Response:
+async def call_paid(url: str, header: str, method: str = "GET", params: dict | None = None,
+                    x402_version: int = 2) -> httpx.Response:
     """Present the signed authorization and return the merchant's response.
+
+    The signature travels under the header name the merchant's own version
+    reads, and a 402 — which says the payment was not taken — is retried once
+    under the other name; see _header_names for why both still occur in the wild.
 
     Transport failures are translated rather than allowed to escape, and the two
     kinds are kept apart because they mean opposite things to the payer: if the
@@ -274,11 +317,14 @@ async def call_paid(url: str, header: str, method: str = "GET", params: dict | N
     await _assert_public_https(url)
     try:
         async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
-            response = await client.request(
-                method, url,
-                headers={"User-Agent": USER_AGENT, "Accept": "application/json", "X-PAYMENT": header},
-                **_request_args(method, params),
-            )
+            for name in _header_names(x402_version):
+                response = await client.request(
+                    method, url,
+                    headers={"User-Agent": USER_AGENT, "Accept": "application/json", name: header},
+                    **_request_args(method, params),
+                )
+                if response.status_code != 402:
+                    break
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.UnsupportedProtocol) as exc:
         raise PaymentNotSent(f"The agent could not be reached ({type(exc).__name__}), so nothing was charged") from exc
     except httpx.HTTPError as exc:

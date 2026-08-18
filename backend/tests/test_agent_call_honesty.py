@@ -226,7 +226,10 @@ async def test_mcp_without_a_chat_tool_reports_its_real_tools(monkeypatch, publi
 
 @pytest.mark.anyio
 async def test_probe_reports_live_for_a_healthy_mcp_server(monkeypatch, public_host):
-    _install(monkeypatch, [_response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}})])
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "get_pool_apr"}]}}),
+    ])
 
     status, _note, _reached = await agent_client.probe_endpoint("mcp", "https://agent.example/rpc")
 
@@ -244,24 +247,101 @@ async def test_probe_reports_auth_for_a_credentialled_endpoint(monkeypatch, publ
 
 
 @pytest.mark.anyio
-async def test_probe_treats_task_not_found_as_live(monkeypatch, public_host):
-    """The A2A probe is a read-only lookup for an id that cannot exist. A
-    compliant server answering "not found" has proved it is reachable and let us
-    in — without spending the agent's inference budget on a probe message."""
-    _install(monkeypatch, [_response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}})])
+async def test_probe_asks_an_a2a_agent_the_question_hiring_asks(monkeypatch, public_host):
+    """A lookup for a task that cannot exist proves the server is reachable, and
+    nothing more. Measured against the live catalogue: of 41 A2A services badged
+    ready to hire on that evidence, 1 answered when actually hired, 7 quoted a
+    price, 29 refused and 4 timed out — and the single one that answered was the
+    single one whose verdict had come from a real message. So the probe sends
+    the message, and pays the inference the honest answer costs."""
+    client = _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "text", "text": "I price BNB pools."}]}}),
+    ])
 
     status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
 
     assert status == "live"
+    assert [p["body"]["method"] for p in client.sent] == ["message/send"]
 
 
 @pytest.mark.anyio
-async def test_probe_sends_no_message_when_the_lookup_already_answers(monkeypatch, public_host):
-    client = _install(monkeypatch, [_response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}})])
+async def test_an_a2a_agent_that_acknowledges_without_answering_is_not_live(monkeypatch, public_host):
+    """One gateway backs 27 of the listed services and replies {"status":"OK"}
+    to every hire. The old lookup called that live; hiring calls it a refusal,
+    and hiring is the thing the badge is a promise about."""
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "data", "data": {"status": "OK"}}]}}),
+    ])
 
-    await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+    status, note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
 
-    assert [p["body"]["method"] for p in client.sent] == ["tasks/get"]
+    assert status != "live"
+    assert "no answer" in note
+
+
+@pytest.mark.anyio
+async def test_an_a2a_agent_that_quotes_a_price_is_recorded_as_paying(monkeypatch, public_host):
+    """A signed ERC-8183 quote is a working agent behind an escrow AgentDock
+    cannot settle yet. That is neither "live" nor broken, and the status
+    vocabulary has had a word for it all along."""
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "data", "data": {
+            "response": {"accepted": True, "terms": {"price": "100000000000000000",
+                                                     "currency": "0xcE24439F2D9C6a2289F741120FE202248B666666"}},
+            "verifying_contract": "0xEa4DAa3100000000000000000000000000000000"}}]}}),
+    ])
+
+    status, note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
+
+    assert status == "payment"
+    assert "0.1 U" in note
+
+
+@pytest.mark.anyio
+async def test_an_mcp_server_is_only_live_once_it_names_a_tool(monkeypatch, public_host):
+    """initialize proves a server is there; hiring goes on to tools/list and
+    calls one. A handshake that leads to an empty menu is not something to put
+    an Activate button on."""
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+    ])
+
+    status, note, _reached = await agent_client.probe_endpoint("mcp", "https://agent.example/rpc")
+
+    assert status != "live"
+    assert "tool" in note.lower()
+
+
+@pytest.mark.anyio
+async def test_hiring_retries_with_the_agent_id_in_the_path_when_asked(monkeypatch, public_host):
+    """The probe took an endpoint at its word when it asked for the agent id in
+    the path; the hire path did not, so an agent could pass the probe and fail
+    the hire on the address alone."""
+    client = _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "missing agentId in path"}}),
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "text", "text": "Health factor 1.8"}]}}),
+    ])
+
+    result = await agent_client.call_a2a("https://agent.example/rpc", "how is my position?", 4242)
+
+    assert result["output"] == "Health factor 1.8"
+    assert client.sent[-1]["url"].endswith("/4242")
+
+
+@pytest.mark.anyio
+async def test_an_unbound_agent_says_so_when_hired(monkeypatch, public_host):
+    """12,657 registrations are unbound — the platform reporting no service
+    behind the name. The probe already told them apart from ordinary errors;
+    hiring has to use the same word, or the two disagree about the same agent."""
+    _install(monkeypatch, [
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "Agent is UNBOUND: no service deployed"}}),
+    ])
+
+    with pytest.raises(agent_client.AgentRejected) as caught:
+        await agent_client.call_a2a("https://agent.example/rpc", "hello", None)
+
+    assert caught.value.reason == "unbound"
 
 
 @pytest.mark.anyio
@@ -332,7 +412,7 @@ async def test_a2a_follows_an_agent_card_to_the_real_endpoint(monkeypatch, publi
 async def test_probe_follows_an_agent_card_before_judging_it(monkeypatch, public_host):
     _install(monkeypatch, [
         _response(CARD),
-        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}}),
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "text", "text": "I quote BNB pools."}]}}),
     ])
 
     status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://api.example/.well-known/agent-card.json")
@@ -347,7 +427,7 @@ async def test_probe_reports_the_url_it_actually_reached(monkeypatch, public_hos
     endpoint the result is about, so the probe reports where it landed."""
     _install(monkeypatch, [
         _response(CARD),
-        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "Task not found"}}),
+        _response({"jsonrpc": "2.0", "id": 1, "result": {"parts": [{"kind": "text", "text": "I quote BNB pools."}]}}),
     ])
 
     status, _note, reached = await agent_client.probe_endpoint(
@@ -362,6 +442,7 @@ async def test_probe_reports_the_filled_in_id_template(monkeypatch, public_host)
     """The declared URL is not a legal request until the id is substituted."""
     _install(monkeypatch, [
         _response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}),
+        _response({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "get_pool_apr"}]}}),
     ])
 
     _status, _note, reached = await agent_client.probe_endpoint(
@@ -451,28 +532,12 @@ async def test_probe_gives_up_on_a_hanging_endpoint(monkeypatch, public_host):
 
 
 @pytest.mark.anyio
-async def test_probe_falls_back_to_a_message_when_the_lookup_is_rejected(monkeypatch, public_host):
-    """An endpoint may not implement tasks/get at all. That says nothing about
-    whether it can be called, so the probe asks the way the run path would."""
-    client = _install(monkeypatch, [
-        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method: tasks/get"}}),
-        _response({"jsonrpc": "2.0", "id": 2, "result": {"parts": [{"kind": "text", "text": "pong"}]}}),
-    ])
-
-    status, _note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
-
-    assert status == "live"
-    assert [p["body"]["method"] for p in client.sent] == ["tasks/get", "message/send"]
-
-
-@pytest.mark.anyio
 async def test_reachable_is_not_callable(monkeypatch, public_host):
     """The real case this rule exists for: one shared endpoint backed 180
     registrations, answered every lookup, and refused each actual call with
     "which agent?". Reachable must not be recorded as activatable."""
     _install(monkeypatch, [
-        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method: tasks/get"}}),
-        _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "a valid agent tokenId is required"}}),
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "a valid agent tokenId is required"}}),
     ])
 
     status, note, _reached = await agent_client.probe_endpoint("a2a", "https://agent.example/rpc")
@@ -539,8 +604,7 @@ async def test_shared_endpoint_asking_for_an_id_is_retried_at_the_path_it_named(
     "a valid agent tokenId is required (path /api/a2a/:agentId)". Following the
     convention it stated turns "faulty" into the operator's real answer."""
     client = _install(monkeypatch, [
-        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method: tasks/get"}}),
-        _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "a valid agent tokenId is required (path /api/a2a/:agentId)"}}),
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "a valid agent tokenId is required (path /api/a2a/:agentId)"}}),
         _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32040, "message": "agent 153799 is not open to inbound A2A calls"}}),
     ])
 
@@ -554,8 +618,7 @@ async def test_shared_endpoint_asking_for_an_id_is_retried_at_the_path_it_named(
 @pytest.mark.anyio
 async def test_agent_reachable_at_the_named_path_is_live(monkeypatch, public_host):
     _install(monkeypatch, [
-        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "unsupported method"}}),
-        _response({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "a valid agent tokenId is required"}}),
+        _response({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "a valid agent tokenId is required"}}),
         _response({"jsonrpc": "2.0", "id": 2, "result": {"parts": [{"kind": "text", "text": "I am agent 7"}]}}),
     ])
 

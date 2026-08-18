@@ -75,7 +75,11 @@ export default function HirePage() {
             endpointLabel: unusable ? unusable.label : `Live ${(a.endpoint_kind || "").toUpperCase()} endpoint`,
             iconName: `${a.chain_id}-${a.token_id}-${a.name}`,
             iconSrc: a.has_source_icon ? `${process.env.REACT_APP_BACKEND_URL}/api/onchain/agents/mainnet/${a.token_id}/icon` : undefined,
-            runnable: !unusable, blockedReason: unusable?.hint,
+            runnable: !unusable,
+            // A priced agent recorded what it actually quoted; that sentence is
+            // worth more to the visitor than the generic one about the rail.
+            blockedReason: unusable && a.endpoint_status === "payment" && a.endpoint_note
+              ? a.endpoint_note : unusable?.hint,
             suggestions: a.suggested_objectives || [], toolCount: (a.capabilities || []).length,
           });
         })

@@ -546,15 +546,44 @@ def _first_data_error(data_parts: list[dict]) -> tuple[str | None, list]:
     return None, []
 
 
-async def call_a2a(url: str, objective: str, token_id: int | None = None) -> dict[str, Any]:
+async def call_a2a(url: str, objective: str, token_id: int | None = None,
+                   trace: dict[str, str] | None = None) -> dict[str, Any]:
+    """Ask an A2A agent to do the work, and interpret what comes back.
+
+    Also the probe: a verdict about whether an agent can be hired has to come
+    from hiring it, so `trace` reports the address this actually reached.
+    """
     await _assert_public_https(substitute_agent_id(url, token_id))
     async with httpx.AsyncClient(timeout=CALL_TIMEOUT, follow_redirects=False) as client:
         target = await resolve_a2a_endpoint(client, url, token_id)
+        if trace is not None:
+            trace["url"] = target
         parts: list[dict] = [{"kind": "text", "text": objective}]
+        addressed = False
         for attempt in ("text", "skill"):
-            response = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
-                "message": {"role": "user", "parts": parts, "messageId": f"agentdock-{attempt}"}}})
-            result = _unwrap(_sse_or_json(response.text), "message/send", tolerate_bare=True)
+            body = {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
+                "message": {"role": "user", "parts": parts, "messageId": f"agentdock-{attempt}"}}}
+            envelope = _sse_or_json((await _post(client, target, body)).text)
+            error = envelope.get("error") if isinstance(envelope, dict) and isinstance(envelope.get("error"), dict) else None
+            complaint = str((error or {}).get("message") or "")
+            # The endpoint asked for the agent's id in its path. Take it at its
+            # word, once. The probe always did this and the hire path did not,
+            # so an agent could pass the probe and fail the hire on address alone.
+            if error and token_id is not None and not addressed and _asks_for_agent_id(complaint):
+                addressed = True
+                target = f"{target.rstrip('/')}/{token_id}"
+                if trace is not None:
+                    trace["url"] = target
+                envelope = _sse_or_json((await _post(client, target, body)).text)
+                error = envelope.get("error") if isinstance(envelope, dict) and isinstance(envelope.get("error"), dict) else None
+                complaint = str((error or {}).get("message") or "")
+            # The platform reporting no service behind the name is its own
+            # verdict rather than an ordinary upstream error: 12,657
+            # registrations are in that state and the catalogue counts them
+            # apart from agents that answered badly.
+            if error and _looks_unbound(complaint):
+                raise AgentRejected(complaint, reason="unbound")
+            result = _unwrap(envelope, "message/send", tolerate_bare=True)
             text = _a2a_text(result)
             # A Task can complete the JSON-RPC call successfully while reporting
             # that the work itself did not succeed.
@@ -610,76 +639,54 @@ async def probe_endpoint(kind: str, url: str, token_id: int | None = None) -> tu
 
 async def _probe(kind: str, url: str, token_id: int | None = None,
                  trace: dict[str, str] | None = None) -> tuple[str, str]:
-    """Check whether an endpoint can actually be called, returning (status, note).
+    """Check whether an endpoint can actually be hired, returning (status, note).
 
-    status is one of live | auth | payment | dead | error. Only "live" earns the
-    Activate button: an endpoint published in on-chain metadata proves only that
-    somebody wrote a URL there, and roughly a third of them turn out to be
-    offline, credential-gated or paid.
+    status is one of live | payment | auth | unbound | dead | error. Only "live"
+    earns the Activate button: an endpoint published in on-chain metadata proves
+    only that somebody wrote a URL there, and most turn out to be offline,
+    credential-gated, paid, or empty.
 
-    Neither probe asks the agent to think. MCP gets `initialize` + nothing else.
-    A2A gets a read-only `tasks/get` for an id that cannot exist — a compliant
-    server answers "task not found", which proves it is reachable and did not
-    turn us away for credentials, without spending the operator's inference
-    budget on a liveness check.
+    Both transports are asked the question hiring asks, because the badge is a
+    promise about hiring. MCP gets initialize and tools/list — the two steps a
+    hire takes before it calls anything. A2A goes through call_a2a itself.
+
+    The cheap lookup this used to do (`tasks/get` for an id that cannot exist)
+    proved only that a server was there. Measured against the live catalogue: of
+    41 A2A services badged ready to hire on that evidence, 1 answered when
+    actually hired, 7 quoted a price, 29 refused and 4 timed out — and the one
+    that answered was the only one whose verdict had come from a real message.
+    The agent's inference is worth what a true verdict costs.
     """
     trace = trace if trace is not None else {}
     try:
         await _assert_public_https(substitute_agent_id(url, token_id))
-        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT, follow_redirects=False) as client:
-            if kind == "mcp":
-                url = substitute_agent_id(url, token_id)
-                trace["url"] = url
-                init = await _post(client, url, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        if kind == "mcp":
+            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT, follow_redirects=False) as client:
+                target = substitute_agent_id(url, token_id)
+                trace["url"] = target
+                init = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                     "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "agentdock", "version": "1.0"}}})
+                session = init.headers.get("mcp-session-id") or init.headers.get("Mcp-Session-Id")
                 _unwrap(_sse_or_json(init.text), "initialize")
-                return "live", "MCP initialize succeeded"
-
-            target = await resolve_a2a_endpoint(client, url, token_id)
-            trace["url"] = target
-            response = await _post(client, target, {"jsonrpc": "2.0", "id": 1, "method": "tasks/get",
-                "params": {"id": "agentdock-liveness-probe"}})
-            envelope = _sse_or_json(response.text)
-            if envelope is None:
-                return "error", "Endpoint did not answer with JSON"
-            error = envelope.get("error")
-            if not isinstance(error, dict):
-                return "live", "A2A responded"
-            message = str(error.get("message") or "")
-            code = error.get("code")
-            if _looks_like_auth(f"{code} {message}"):
-                return "auth", message or "credential required"
-            if code == -32001 or "not found" in message.lower():
-                # The server looked the task up for us and it simply does not
-                # exist. That is proof it would accept a real call.
-                return "live", "A2A reachable (probe task not found, as expected)"
-            # It rejected the request itself, not the task — so reachable is not
-            # yet callable. One shared endpoint served 180 registrations and
-            # answered every lookup, while refusing each actual call with "which
-            # agent?". The only way to tell those apart is to make the call the
-            # run path would make, so the verdict matches what the user gets.
-            probe_body = {"jsonrpc": "2.0", "id": 2, "method": "message/send", "params": {
-                "message": {"role": "user", "parts": [{"kind": "text", "text": PROBE_MESSAGE}], "messageId": "agentdock-probe"}}}
-            send = await _post(client, target, probe_body)
-            envelope = _sse_or_json(send.text) or {}
-            reply_error = envelope.get("error") if isinstance(envelope.get("error"), dict) else None
-            reply_message = str((reply_error or {}).get("message") or "")
-
-            # The endpoint asked for the agent's id in the path. Take it at its word,
-            # once, rather than recording "faulty" for something addressable.
-            if reply_error and token_id is not None and _asks_for_agent_id(reply_message):
-                trace["url"] = f"{target.rstrip('/')}/{token_id}"
-                send = await _post(client, trace["url"], probe_body)
-                envelope = _sse_or_json(send.text) or {}
-                reply_error = envelope.get("error") if isinstance(envelope.get("error"), dict) else None
-                reply_message = str((reply_error or {}).get("message") or "")
-
-            if reply_error and _looks_unbound(reply_message):
-                return "unbound", reply_message
-            _unwrap(envelope, "message/send", tolerate_bare=True)
-            return "live", "A2A answered a probe message"
-    except AgentPaymentRequired:
-        return "payment", "Endpoint answers 402 — charges through its own x402 flow"
+                listed = await _post(client, target, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, session)
+                tools = _unwrap(_sse_or_json(listed.text), "tools/list").get("tools") or []
+                if not tools:
+                    # A handshake leading to an empty menu is not something to
+                    # put an Activate button on: the hire would have nothing to
+                    # call and would say so at the last step instead of the first.
+                    return "error", "Completed the MCP handshake but declares no tool to call"
+                return "live", f"MCP handshake and tools/list succeeded ({len(tools)} tools)"
+        # Nothing is invented on the agent's behalf: PROBE_MESSAGE says what the
+        # request is and asks for nothing, and the reply is judged exactly as a
+        # hire's reply is judged — including a refusal dressed as {"status":"OK"}.
+        await call_a2a(url, PROBE_MESSAGE, token_id, trace)
+        return "live", "A2A answered a probe message"
+    except AgentPaymentRequired as exc:
+        detail = str(exc)
+        # A quote carries its own price and escrow contract; the bare x402 case
+        # carries nothing worth repeating, so it keeps the sentence it had.
+        return "payment", detail if detail != "Agent requires payment" else \
+            "Endpoint answers 402 — charges through its own x402 flow"
     except AgentRejected as exc:
         return {"auth": "auth", "unbound": "unbound"}.get(exc.reason, "error"), str(exc)
     except AgentCallError as exc:

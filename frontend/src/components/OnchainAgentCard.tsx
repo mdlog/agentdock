@@ -15,7 +15,10 @@ export const compactNumber = (value?: number) =>
 export const UNAVAILABLE: Record<string, { label: string; note: string; hint: string }> = {
   none: { label: "Identity only", note: "No endpoint published", hint: "This agent registered an identity but no callable endpoint." },
   auth: { label: "Needs a credential", note: "Endpoint is private", hint: "The endpoint answered, but requires its own API key." },
-  payment: { label: "Charges separately", note: "Bills through its own x402", hint: "This agent settles through its own x402 endpoint, which AgentDock does not settle yet." },
+  // Two rails end up here: an x402 endpoint answering 402, and an ERC-8183
+  // agent returning a signed quote. The wording has to fit both, and the
+  // agent's own note carries the actual price where there is one.
+  payment: { label: "Charges for the job", note: "Quotes its own price", hint: "This agent prices the work — through ERC-8183 escrow or its own x402 flow — and AgentDock cannot settle either yet." },
   unbound: { label: "Not deployed", note: "No service attached", hint: "The hosting platform lists this agent as registered but with no service bound to it yet." },
   dead: { label: "Endpoint offline", note: "Did not respond", hint: "The published endpoint could not be reached when we last checked." },
   error: { label: "Endpoint faulty", note: "Answered incorrectly", hint: "The endpoint responded, but not in a way AgentDock could use." },

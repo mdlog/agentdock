@@ -334,21 +334,34 @@ async def call_paid(url: str, header: str, method: str = "GET", params: dict | N
     return response
 
 
+# The whole check, both methods included. Asking twice doubles what a hanging
+# host can cost, and the catalogue sync walks every listing in turn.
+CHECK_TIMEOUT_SECONDS = 25
+
+
 async def check_resource(url: str) -> tuple[bool, str]:
     """Whether a bazaar resource actually answers with payment terms.
 
-    A payable resource's whole contract is: request it, get a 402 with terms.
-    Anything else — a 404, a timeout, an empty 200 — means the listing cannot
-    be hired, and the catalogue should say so rather than let the visitor
+    Asked the way hiring asks it — through fetch_challenge, fallback to POST
+    included. A bare GET here reported "Answered HTTP 404 instead of payment
+    terms" for every Xona and BortAgent listing while the hire path was getting
+    a signed 402 out of the same URL by posting to it, exactly as the comment on
+    fetch_challenge says it would. The catalogue was understating its own payable
+    supply — 12 listings of 35 rather than 33 — and understating supply is the
+    same failure as overstating it.
+
+    Anything else — a 404 both ways, a timeout, an empty 200 — means the listing
+    cannot be hired, and the catalogue should say so rather than let the visitor
     discover it at the final step.
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
-            response = await client.get(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    except httpx.HTTPError as exc:
+        challenge, response, method = await asyncio.wait_for(fetch_challenge(url), CHECK_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return False, f"Did not answer within {CHECK_TIMEOUT_SECONDS}s"
+    except (B402Error, httpx.HTTPError) as exc:
         return False, f"{type(exc).__name__}: {exc}"[:200]
-    if response.status_code == 402:
-        return True, "Answered 402 with payment terms"
+    if challenge:
+        return True, f"Answered 402 with payment terms ({method})"
     # A 2xx means the resource serves without payment — odd for a paid listing,
     # but a visitor can still use it, so it is not a dead end.
     if response.status_code < 300:

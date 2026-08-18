@@ -7,6 +7,7 @@ redirect with an empty body was recorded as a free result. Each of those tells
 the user something about their money that is not true.
 """
 
+import asyncio
 import base64
 import json
 from types import SimpleNamespace
@@ -398,3 +399,95 @@ async def test_the_quote_records_which_version_the_merchant_speaks(monkeypatch):
     await server._run_b402("task-1", _task(state="created"))
 
     assert db.tasks.docs[0]["b402_x402_version"] == 1
+
+
+# --- a listing's verdict has to be the question hiring actually asks ---------
+#
+# check_resource asked with a bare GET while the hire path, fetch_challenge,
+# falls back to POST — a fallback added because "~half of them answer 404 to GET
+# but 402 to POST (verified: all of Xona, BortAgent)". So every Xona card
+# announced "Not answering · Answered HTTP 404 instead of payment terms" about a
+# merchant that had just quoted 0.01 U to the hire path. The catalogue was
+# understating its own payable supply, and understating it is the same failure
+# as overstating it.
+
+
+def _merchant(by_method):
+    """A merchant that answers differently per method, as many really do."""
+    sent: list[str] = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def request(self, method, url, **_kw):
+            sent.append(method)
+            status = by_method.get(method, 404)
+            headers = {"payment-required": _receipt({"x402Version": 2, "accepts": []})} if status == 402 else {}
+            return httpx.Response(status, content=b"{}", headers=headers, request=httpx.Request(method, url))
+
+        async def get(self, url, **kw):
+            return await self.request("GET", url, **kw)
+
+    return sent, (lambda **_kw: _Client())
+
+
+@pytest.mark.anyio
+async def test_a_merchant_that_only_answers_post_is_listed_as_payable(monkeypatch, public_host):
+    sent, client = _merchant({"GET": 404, "POST": 402})
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    payable, note = await b402.check_resource("https://merchant.example/x")
+
+    assert payable is True
+    assert "POST" in note
+
+
+@pytest.mark.anyio
+async def test_a_merchant_that_answers_a_get_is_not_asked_twice(monkeypatch, public_host):
+    sent, client = _merchant({"GET": 402})
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    payable, _note = await b402.check_resource("https://merchant.example/x")
+
+    assert payable is True
+    assert sent == ["GET"]
+
+
+@pytest.mark.anyio
+async def test_a_resource_that_answers_neither_way_is_still_marked_dead(monkeypatch, public_host):
+    """The listing that started all this — one endpoint really does 404 both
+    ways — must keep saying so."""
+    sent, client = _merchant({"GET": 404, "POST": 404})
+    monkeypatch.setattr(b402.httpx, "AsyncClient", client)
+
+    payable, note = await b402.check_resource("https://merchant.example/x")
+
+    assert payable is False
+    assert "404" in note
+
+
+@pytest.mark.anyio
+async def test_a_merchant_that_never_answers_does_not_hold_up_the_sync(monkeypatch, public_host):
+    """Asking twice doubles the time a hanging host can cost, and the catalogue
+    sync walks every listing in turn."""
+    class _Hanging:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def request(self, *_a, **_kw):
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(b402.httpx, "AsyncClient", lambda **_kw: _Hanging())
+    monkeypatch.setattr(b402, "CHECK_TIMEOUT_SECONDS", 0.05)
+
+    payable, note = await b402.check_resource("https://merchant.example/x")
+
+    assert payable is False
+    assert "answer" in note.lower()

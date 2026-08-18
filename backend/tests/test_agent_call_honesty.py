@@ -1041,8 +1041,11 @@ def test_the_browse_grid_lists_a_shared_gateway_once():
     # registration by name.
     assert 'sort == "ready" and not search' in listing
 
-    for fn in (server.marketplace_pulse, server.marketplace_verified, server.list_categories):
+    for fn in (server.marketplace_verified, server.list_categories):
         assert '"endpoint_primary": {"$ne": False}' in inspect.getsource(fn), fn.__name__
+    # The pulse's queries moved next to the indexes they are counted from, so
+    # this reads the query it actually issues rather than the route's source.
+    assert server.pulse_queries(56, "2026-08-18T00:00:00+00:00")["agents_live"]["endpoint_primary"] == {"$ne": False}
 
 
 def test_catalogue_sync_seeds_categories_but_never_overwrites_evidence():

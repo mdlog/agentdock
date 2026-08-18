@@ -72,6 +72,8 @@ async def startup() -> None:
     await db.scan_agents.create_index([("chain_id", 1), ("activatable", -1), ("total_score", -1)])
     await db.scan_agents.create_index([("chain_id", 1), ("endpoint_primary", 1)])
     await db.scan_agents.create_index([("chain_id", 1), ("categories", 1), ("activatable", -1), ("total_score", -1)])
+    for spec in PULSE_INDEXES:
+        await db.scan_agents.create_index(spec["keys"], **spec.get("options", {}))
     await db.sync_runs.create_index([("source", 1), ("chain_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("feedback_id", 1)], unique=True)
     await db.scan_feedbacks.create_index([("chain_id", 1), ("agent_id", 1), ("submitted_at", -1)])
@@ -91,6 +93,7 @@ async def startup() -> None:
     app.state.scan_mainnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 56, False))
     app.state.head_sync_task = __import__("asyncio").create_task(_head_sync_loop())
     app.state.enrich_loop_task = __import__("asyncio").create_task(_enrich_loop())
+    app.state.backlog_loop_task = __import__("asyncio").create_task(_backlog_loop())
     app.state.scan_testnet_feedback_task = __import__("asyncio").create_task(sync_feedbacks(db, 97, True))
 
 
@@ -129,6 +132,31 @@ async def _enrich_loop(interval_seconds: int = 3600) -> None:
         except Exception as exc:  # a bad pass must not end the loop
             print(f"Endpoint re-probe failed: {exc}")
         await asyncio.sleep(interval_seconds)
+
+
+async def _backlog_loop(batch: int = 400, pause_seconds: int = 60, idle_seconds: int = 1800) -> None:
+    """Call the endpoints nobody has ever called.
+
+    The hourly refresh only looks at agents the marketplace can already surface,
+    which left 239,457 registrations never probed once — and every new one
+    joined them, because a name that matches no category never enters that
+    scope. This walks the backlog newest-first, a batch per pass, and goes quiet
+    once it is empty rather than re-running an empty query forever.
+
+    No "running" guard, unlike the refresh: nothing else starts this sweep, each
+    pass is awaited before the next, and a guard a killed process leaves behind
+    is a sweep that never runs again.
+    """
+    while True:
+        checked = 0
+        try:
+            result = await enrich_endpoints(CHAIN_ID, limit=batch, scope="backlog")
+            checked = result.get("checked") or 0
+            if checked:
+                print(f"Endpoint backlog: {checked} first calls, {result.get('activatable', 0)} live")
+        except Exception as exc:  # a bad pass must not end the loop
+            print(f"Endpoint backlog pass failed: {exc}")
+        await asyncio.sleep(pause_seconds if checked else idle_seconds)
 
 
 async def sync_b402_catalog() -> dict:
@@ -298,16 +326,31 @@ async def mark_endpoint_groups(chain_id: int = 56) -> dict:
     return {"services": groups, "registrations": marked}
 
 
-async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
-    """Resolve callable endpoints for categorized agents and flag the activatable
-    ones. Bounded to the categorized set (a few hundred) — those are what the
-    marketplace browses — and paced under the 8004scan budget."""
-    key = {"source": "endpoint_enrich", "chain_id": chain_id}
-    await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": now_iso()}}, upsert=True)
-    # `endpoint_status` is the marker for a *probed* agent. Records from the
-    # earlier metadata-only pass have none, so they are re-examined rather than
-    # left carrying a claim nobody ever tested.
-    stale_before = (datetime.now(timezone.utc) - timedelta(hours=ENDPOINT_VERDICT_TTL_HOURS)).isoformat()
+# The two sweeps that call agent endpoints, and the run each records under.
+ENDPOINT_SWEEPS = {"refresh": "endpoint_enrich", "backlog": "endpoint_backlog"}
+
+
+def endpoint_scope(chain_id: int, scope: str, stale_before: str) -> tuple[dict, list | None, str]:
+    """Which agents a sweep calls, in what order, and the run it records under.
+
+    Two sweeps, two jobs. "refresh" keeps the verdicts the marketplace already
+    shows from going stale, across the small set it can surface. "backlog"
+    reaches the agents nobody has ever called at all: on 18 August that was
+    239,457 of 257,792, and every new registration joined them — 1,020 arrived
+    over two days and 5 were called, because the refresh only looks at agents
+    already known to be interesting. It walks newest-first, so a registration
+    made today is called within the hour instead of queueing behind a quarter of
+    a million older ones.
+
+    They record under different sources on purpose: each loop skips its pass
+    while its own record reads "running", so one shared record would let a long
+    backlog pass stall the hourly refresh.
+    """
+    if scope == "backlog":
+        # No verdict has ever been written for these, so nothing here is being
+        # re-derived and no host is asked what it has already answered.
+        return ({"chain_id": chain_id, "endpoint_status": {"$exists": False}},
+                [("token_id", -1)], ENDPOINT_SWEEPS["backlog"])
     # Scoping this to categorised agents alone stranded 26 agents that answered
     # a probe but matched no theme: they kept an Activate button the sweep could
     # never re-test, so the marketplace advertised them while their detail page
@@ -321,15 +364,54 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
     reachable = {"$or": [{"categories": {"$ne": []}},
                          {"activatable": True},
                          {"endpoint_status": {"$in": ["live", "auth", "payment"]}}]}
+    # `endpoint_status` is the marker for a *probed* agent. Records from the
+    # earlier metadata-only pass have none, so they are re-examined rather than
+    # left carrying a claim nobody ever tested.
     unverified = {"$or": [{"endpoint_status": {"$exists": False}},
                           {"endpoint_checked_at": {"$lt": stale_before}},
                           {"endpoint_checked_at": {"$exists": False}}]}
+    return {"chain_id": chain_id, "$and": [reachable, unverified]}, None, ENDPOINT_SWEEPS["refresh"]
+
+
+async def enrich_endpoints(chain_id: int = 56, limit: int = 600, scope: str = "refresh") -> dict:
+    """Call agent endpoints and record what each one actually did.
+
+    Bounded per pass and paced under the 8004scan budget; `scope` decides which
+    agents this pass is for — see endpoint_scope.
+    """
+    stale_before = (datetime.now(timezone.utc) - timedelta(hours=ENDPOINT_VERDICT_TTL_HOURS)).isoformat()
+    query, order, source = endpoint_scope(chain_id, scope, stale_before)
+    key = {"source": source, "chain_id": chain_id}
+    await db.sync_runs.update_one(key, {"$set": {"status": "running", "started_at": now_iso()}}, upsert=True)
     cursor = db.scan_agents.find(
-        {"chain_id": chain_id, "$and": [reachable, unverified]},
+        query,
         {"_id": 0, "id": 1, "chain_id": 1, "token_id": 1, "raw_8004scan_detail": 1, "name": 1, "description": 1},
-    ).limit(limit)
+    )
+    if order:
+        cursor = cursor.sort(order)
+    cursor = cursor.limit(limit)
     client = Scan8004Client()
     checked = activatable = 0
+
+    async def record(agent: dict, update: dict) -> None:
+        """One agent's verdict, written the moment it is known.
+
+        Not at the end of the pass: most of the backlog publishes no endpoint at
+        all, so collecting those and writing them in one burst left the public
+        count frozen for 135 seconds and then jumping by 400. It also threw away
+        every verdict a pass had reached if the pass was interrupted.
+        """
+        nonlocal checked, activatable
+        update["endpoint_checked"] = True
+        update["endpoint_checked_at"] = now_iso()
+        await db.scan_agents.update_one({"chain_id": chain_id, "token_id": agent["token_id"]}, {"$set": update})
+        checked += 1
+        activatable += 1 if update.get("activatable") else 0
+        # Progress is published as it happens: a run that only reports at the
+        # end is indistinguishable from one that has hung.
+        if checked % 20 == 0:
+            await db.sync_runs.update_one(key, {"$set": {"checked": checked, "activatable": activatable}})
+
     try:
         # 8004scan is rate limited, so details are read in a paced pass; the
         # probes that follow hit hundreds of unrelated hosts and run concurrently.
@@ -360,7 +442,16 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
             # so the card should not go blank over a naming difference.
             if "rank" not in ranked and "network_rank" in ranked:
                 ranked["rank"] = ranked["network_rank"]
-            resolved.append((agent, agent_client.pick_endpoint(detail), ranked))
+            endpoint = agent_client.pick_endpoint(detail)
+            if endpoint is None:
+                # There is nothing to call, so the verdict is already final.
+                # Clearing both URLs matters: $set leaves whatever the last
+                # sweep stored, and the detail page would then stamp a service
+                # "tested below" and name a URL for a call this sweep just
+                # recorded there was nothing to make.
+                await record(agent, {**NO_ENDPOINT_VERDICT, **ranked})
+            else:
+                resolved.append((agent, endpoint, ranked))
             await asyncio.sleep(0.34)
 
         gate = asyncio.Semaphore(8)
@@ -378,13 +469,7 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
         verdict_cache: dict[str, asyncio.Future] = {}
         host_locks: dict[str, asyncio.Lock] = {}
 
-        async def verify(agent: dict, ep: tuple[str, str] | None, ranked: dict) -> tuple[dict, dict]:
-            if not ep:
-                # Clearing both URLs matters: $set leaves whatever the last
-                # sweep stored, and the detail page would then stamp a service
-                # "tested below" and name a URL for a call this sweep just
-                # recorded there was nothing to make.
-                return agent, {**NO_ENDPOINT_VERDICT, **ranked}
+        async def verify(agent: dict, ep: tuple[str, str], ranked: dict) -> tuple[dict, dict]:
             kind, url = ep
             token_id = agent["token_id"]
             resolved = agent_client.substitute_agent_id(url, token_id)
@@ -437,21 +522,13 @@ async def enrich_endpoints(chain_id: int = 56, limit: int = 600) -> dict:
 
         for completed in asyncio.as_completed([verify(a, e, r) for a, e, r in resolved]):
             agent, update = await completed
-            update["endpoint_checked"] = True
-            update["endpoint_checked_at"] = now_iso()
-            await db.scan_agents.update_one({"chain_id": chain_id, "token_id": agent["token_id"]}, {"$set": update})
-            checked += 1
-            activatable += 1 if update["activatable"] else 0
-            # Progress is published as it happens: a run that only reports at the
-            # end is indistinguishable from one that has hung.
-            if checked % 20 == 0:
-                await db.sync_runs.update_one(key, {"$set": {"checked": checked, "activatable": activatable, "total": len(resolved)}})
+            await record(agent, update)
         groups = await mark_endpoint_groups(chain_id)
-        result = {"status": "success", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked,
+        result = {"status": "success", "source": source, "chain_id": chain_id, "checked": checked,
                   "distinct_services": groups["services"],
                   "activatable": activatable, "unknown": unknown, "completed_at": now_iso()}
     except Exception as exc:
-        result = {"status": "degraded", "source": "endpoint_enrich", "chain_id": chain_id, "checked": checked, "activatable": activatable, "error": str(exc), "failed_at": now_iso()}
+        result = {"status": "degraded", "source": source, "chain_id": chain_id, "checked": checked, "activatable": activatable, "error": str(exc), "failed_at": now_iso()}
     await db.sync_runs.update_one(key, {"$set": result}, upsert=True)
     return result
 
@@ -490,6 +567,39 @@ async def marketplace_verified(network: str = "mainnet", limit: int = Query(defa
             "catalogue_total": await db.scan_agents.count_documents({"chain_id": chain_id})}
 
 
+# The pulse under the search box is polled every few seconds while the backlog
+# sweep is calling endpoints, so its figures have to come off an index rather
+# than a scan. Measured before these existed, on 257,794 documents:
+# registered_today 445ms, endpoints_verified 299ms — every document, every poll.
+PULSE_INDEXES = [
+    {"keys": [("chain_id", 1), ("created_at", -1)]},
+    # Partial, so counting the called endpoints walks 19,536 index entries
+    # rather than all 257,794. $exists cannot be answered from bounds on a
+    # normal index — a missing field is indexed as null, indistinguishable from
+    # a stored one — so the filter has to live in the index itself.
+    {"keys": [("chain_id", 1)],
+     "options": {"name": "pulse_probed",
+                 "partialFilterExpression": {"endpoint_status": {"$exists": True}}}},
+]
+
+
+def pulse_queries(chain_id: int, midnight: str) -> dict[str, dict]:
+    """The four figures, written as the queries that produce them.
+
+    Kept beside PULSE_INDEXES because they are one decision: a query that drifts
+    away from its index quietly goes back to scanning the whole catalogue on
+    every poll, and nothing in the response would say so.
+    """
+    return {
+        "catalogue_total": {"chain_id": chain_id},
+        "registered_today": {"chain_id": chain_id, "created_at": {"$gte": midnight}},
+        "endpoints_verified": {"chain_id": chain_id, "endpoint_status": {"$exists": True}},
+        # Distinct services, not registrations: 230 rows on one gateway answer
+        # identically, and the pulse should not count one answer 230 times.
+        "agents_live": {"chain_id": chain_id, "activatable": True, "endpoint_primary": {"$ne": False}},
+    }
+
+
 @api.get("/marketplace/pulse", tags=["agents"])
 async def marketplace_pulse(network: str = "mainnet"):
     """What the marketplace has done lately, in numbers that move on their own.
@@ -497,22 +607,14 @@ async def marketplace_pulse(network: str = "mainnet"):
     Every figure is a count of work actually performed — registrations ingested,
     endpoints called — rather than a rendering of activity. It is served
     separately from the catalogue so the page can refresh it without refetching
-    anything else.
+    anything else, and cheaply enough to be asked every few seconds.
     """
     chain_id = 97 if network == "testnet" else 56
     midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     head = await db.sync_runs.find_one({"source": "8004scan_head", "chain_id": chain_id}, {"_id": 0})
-    return {
-        "catalogue_total": await db.scan_agents.count_documents({"chain_id": chain_id}),
-        "registered_today": await db.scan_agents.count_documents({"chain_id": chain_id, "created_at": {"$gte": midnight}}),
-        "endpoints_verified": await db.scan_agents.count_documents({"chain_id": chain_id, "endpoint_status": {"$exists": True}}),
-        # Distinct services, not registrations: 230 rows on one gateway answer
-        # identically, and the pulse should not count one answer 230 times.
-        "agents_live": await db.scan_agents.count_documents(
-            {"chain_id": chain_id, "activatable": True, "endpoint_primary": {"$ne": False}}),
-        "synced_at": (head or {}).get("completed_at"),
-        "chain_id": chain_id,
-    }
+    counts = {name: await db.scan_agents.count_documents(query)
+              for name, query in pulse_queries(chain_id, midnight).items()}
+    return {**counts, "synced_at": (head or {}).get("completed_at"), "chain_id": chain_id}
 
 
 @api.get("/categories", tags=["agents"])

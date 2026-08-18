@@ -20,8 +20,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 // Trading, Yield Optimisation, Health Factor Monitoring). Picking one filters
 // the real onchain catalogue AND the hireable b402 services server-side, so a
 // judge can land, choose a category, and drill into agents that do that job.
+// Both catalogues page at the same size, so the two grids on this screen read
+// as one shelf rather than two of different depths.
+const PAGE = 12;
+
 export default function MarketplacePage() {
-  const PAGE = 60;
   const [onchain, setOnchain] = useState<OnchainAgent[]>([]);
   const [total, setTotal] = useState(0);
   const [readyTotal, setReadyTotal] = useState(0);
@@ -30,6 +33,7 @@ export default function MarketplacePage() {
   const [totalCapped, setTotalCapped] = useState(false);
   const [offset, setOffset] = useState(0);
   const [payable, setPayable] = useState<B402Resource[]>([]);
+  const [payableOffset, setPayableOffset] = useState(0);
   const [categories, setCategories] = useState<AgentCategory[]>([]);
   const [themes, setThemes] = useState<MarketplaceTheme[]>([]);
   const [category, setCategory] = useState<string | null>(null);
@@ -85,6 +89,14 @@ export default function MarketplacePage() {
     (!category || (r.categories || []).includes(category)) &&
     `${r.host} ${r.description}`.toLowerCase().includes(query)
   ), [payable, query, category]);
+  // The b402 catalogue is small enough to hold whole, so its pages are cut from
+  // the filtered list rather than fetched. The onchain grid pages server-side —
+  // 257k rows never fit in a browser — but both show the same twelve at a time.
+  const payablePage = useMemo(
+    () => visiblePayable.slice(payableOffset, payableOffset + PAGE), [visiblePayable, payableOffset]);
+  // A search or category that shortens the list must not strand the reader on
+  // a page that no longer exists.
+  useEffect(() => { setPayableOffset(0); }, [query, category]);
 
   return <div>
     <section className="search-stage">
@@ -129,7 +141,8 @@ export default function MarketplacePage() {
     {source !== "onchain" && visiblePayable.length > 0 && <section className="catalog-section">
       <div className="catalog-heading"><div><p className="section-kicker"><Zap size={13} /> Pay per call · b402 Bazaar</p><h2 data-testid="payable-heading">{activeCat ? `Hireable ${activeCat.label} agents` : "Agents you can hire right now"}</h2></div><span data-testid="payable-result-count">{visiblePayable.length} services</span></div>
       <p className="payable-notice" data-testid="payable-notice"><ShieldAlert size={14} /><span><strong>You sign with your own wallet.</strong> Price, token and recipient are shown before anything is signed — settlement on BNB Chain.</span></p>
-      <div className="onchain-grid" data-testid="payable-grid">{visiblePayable.map(r => <B402ResourceCard key={r.id} resource={r} />)}</div>
+      <div className="onchain-grid" data-testid="payable-grid">{payablePage.map(r => <B402ResourceCard key={r.id} resource={r} />)}</div>
+      <Pagination total={visiblePayable.length} offset={payableOffset} limit={PAGE} onChange={setPayableOffset} noun="services" testId="payable-pagination" />
     </section>}
 
     {source !== "b402" && <section className="catalog-section">

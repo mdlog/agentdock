@@ -132,11 +132,15 @@ a { color: inherit; text-decoration: none; }
 }
 @media(max-width:1240px){.search-stage{grid-template-columns:1fr}.verified-spotlight{max-width:520px}}
 .live-pulse{display:flex;align-items:center;gap:7px;margin:14px 0 0;font-size:11.5px;color:#64748b}
-.live-pulse strong{color:var(--ink);font-weight:700}
+.live-pulse strong{color:var(--ink);font-weight:700;border-radius:3px;padding:0 2px;margin:0 -2px}
 .pulse-dot{width:7px;height:7px;border-radius:50%;background:#16a34a;flex-shrink:0}
 @media(prefers-reduced-motion:no-preference){
   .pulse-dot{animation:pulse-breathe 2.4s ease-in-out infinite}
   @keyframes pulse-breathe{0%,100%{box-shadow:0 0 0 0 rgba(22,163,74,.45)}50%{box-shadow:0 0 0 5px rgba(22,163,74,0)}}
+  /* Lit the instant a figure changes, then fading back on its own: the eye is
+     told which number moved without the number itself being animated. */
+  .live-pulse strong{transition:background-color .7s ease,color .7s ease}
+  .live-pulse strong.moved{background:#ccfbf1;color:var(--teal);transition:none}
 }
 .rotating-word{position:relative;display:inline-grid;grid-auto-rows:1fr;overflow:hidden;vertical-align:bottom;color:var(--teal)}
 .rotating-word>span{grid-area:1/1;white-space:nowrap}
